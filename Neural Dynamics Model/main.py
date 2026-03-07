@@ -68,16 +68,22 @@ def _build_pair_list(methods):
 
 def _print_method_summary(title, method_results, method_order):
     print(f"\n=== {title} ===")
-    print(f"{'Method':<10} | {'Detectability':<14} | {'Clarity':<14} | {'FFI':<8} | {'NDWCI':<8}")
-    print("-" * 70)
+    print(f"{'Method':<10} | {'Detectability':<14} | {'ClarityScore':<14} | {'Fisher':<10} | {'FFI':<8} | {'NDWCI':<8}")
+    print("-" * 90)
+
+    def fmt(v, w):
+        if abs(v) > 10000:
+            return f"{v:<{w}.2e}"
+        return f"{v:<{w}.4f}"
+
     for method in method_order:
         if method not in method_results:
             continue
         result = method_results[method]
         mech = result['mechanistic']
         print(
-            f"{method:<10} | {result['intensity_mean']:<14.4f} | {result['clarity_mean']:<14.4f} | "
-            f"{mech['mean_ffi']:<8.4f} | {mech['ndwci']:<8.4f}"
+            f"{method:<10} | {fmt(result['intensity_mean'], 14)} | {fmt(result['clarity_mean'], 14)} | "
+            f"{fmt(result['fisher_clarity'], 10)} | {fmt(mech['mean_ffi'], 8)} | {fmt(mech['ndwci'], 8)}"
         )
 
 
@@ -101,6 +107,14 @@ def _generate_calibration_scales():
             })
     return scales
 
+def _stack_residual_matrices(matrices):
+    residuals = []
+    for X in matrices:
+        Xn = _to_numpy(X).astype(np.float64, copy=False)
+        mu = Xn.mean(axis=0, keepdims=True)
+        residuals.append(Xn - mu)
+    return np.vstack(residuals)
+
 
 def _calibration_target_probability(freq_hz, amp_scale):
     amp_center = 0.55 if int(round(freq_hz)) == 200 else 0.75
@@ -119,7 +133,7 @@ def _make_response_matrix(response_vectors):
         raise ValueError("At least one response vector is required.")
     use_gpu = any(_is_gpu_array(item) for item in response_vectors)
     xp = cp if use_gpu else np
-    return xp.asarray(response_vectors, dtype=xp.float32)
+    return xp.asarray(response_vectors, dtype=xp.float64)
 
 
 def _precompute_processed_cache(processed, samples_per_bin):
@@ -151,6 +165,102 @@ def _precompute_processed_cache(processed, samples_per_bin):
         'drive_y_win': xp.ascontiguousarray(drive_y_win[:, :trimmed]),
         't_win': xp.ascontiguousarray(t_win[:trimmed]),
         'window_start_idx': window_start_idx,
+        'samples_per_bin': samples_per_bin,
+        'n_bins': n_bins,
+        'n_receptors': filtered_x.shape[0],
+    }
+
+def _estimate_drive_scale(center_caches):
+    medians = []
+    for cache in center_caches.values():
+        fx = _to_numpy(cache['filtered_x']).astype(np.float64, copy=False)
+        fy = _to_numpy(cache['filtered_y']).astype(np.float64, copy=False)
+        rms = np.sqrt(np.mean(fx * fx + fy * fy, axis=1))
+        medians.append(float(np.median(rms)))
+    scale = float(np.median(medians))
+    return max(scale, 1e-12)
+
+def _normalize_processed_cache(cache, scale):
+    use_gpu = _is_gpu_array(cache['filtered_x']) or _is_gpu_array(cache['filtered_y'])
+    xp = cp if use_gpu else np
+    s = float(scale)
+
+    return {
+        'filtered_x': xp.asarray(cache['filtered_x'], dtype=xp.float64) / s,
+        'filtered_y': xp.asarray(cache['filtered_y'], dtype=xp.float64) / s,
+        'drive_x_win': xp.asarray(cache['drive_x_win'], dtype=xp.float64) / s,
+        'drive_y_win': xp.asarray(cache['drive_y_win'], dtype=xp.float64) / s,
+        't_win': cache['t_win'],
+        'window_start_idx': int(cache['window_start_idx']),
+        'samples_per_bin': int(cache['samples_per_bin']),
+        'n_bins': int(cache['n_bins']),
+        'n_receptors': int(cache['n_receptors']),
+    }
+
+def _build_calibration_spatial_template(center_caches):
+    rms_x_list = []
+    rms_y_list = []
+
+    for cache in center_caches.values():
+        fx = _to_numpy(cache['filtered_x']).astype(np.float64, copy=False)
+        fy = _to_numpy(cache['filtered_y']).astype(np.float64, copy=False)
+
+        rms_x_list.append(np.sqrt(np.mean(fx * fx, axis=1)))
+        rms_y_list.append(np.sqrt(np.mean(fy * fy, axis=1)))
+
+    wx = np.median(np.stack(rms_x_list, axis=0), axis=0)
+    wy = np.median(np.stack(rms_y_list, axis=0), axis=0)
+
+    mag = np.sqrt(wx * wx + wy * wy)
+    mag_scale = float(np.median(mag[mag > 0])) if np.any(mag > 0) else 1.0
+    mag_scale = max(mag_scale, 1e-12)
+
+    wx = wx / mag_scale
+    wy = wy / mag_scale
+
+    # 避免出现大量全零弱受体导致 calibration 退化
+    mag = np.sqrt(wx * wx + wy * wy)
+    weak = mag < 0.1
+    if np.any(weak):
+        zero_mask = mag < 1e-12
+        wx[weak] *= 0.1 / (mag[weak] + 1e-12)
+        wy[weak] *= 0.1 / (mag[weak] + 1e-12)
+        wx[zero_mask] = 0.1
+        wy[zero_mask] = 0.0
+
+    return {
+        'weight_x': wx.astype(np.float64, copy=False),
+        'weight_y': wy.astype(np.float64, copy=False),
+    }
+
+def _build_synthetic_calibration_cache(freq_hz, amp_scale, spatial_template, samples_per_bin):
+    duration_s = config.CALIBRATION_DURATION_MS / 1000.0
+    n_time = int(round(duration_s * config.FS_MODEL))
+    if n_time <= 0:
+        raise ValueError("CALIBRATION_DURATION_MS is too small")
+
+    n_bins = n_time // samples_per_bin
+    if n_bins <= 0:
+        raise ValueError("Calibration duration is shorter than one bin")
+
+    trimmed = n_bins * samples_per_bin
+    t = np.arange(trimmed, dtype=np.float64) / config.FS_MODEL
+
+    wave = float(amp_scale) * np.sin(2.0 * np.pi * float(freq_hz) * t)
+
+    wx = np.asarray(spatial_template['weight_x'], dtype=np.float64)
+    wy = np.asarray(spatial_template['weight_y'], dtype=np.float64)
+
+    filtered_x = wx[:, None] * wave[None, :]
+    filtered_y = wy[:, None] * wave[None, :]
+
+    return {
+        'filtered_x': filtered_x,
+        'filtered_y': filtered_y,
+        'drive_x_win': filtered_x.copy(),
+        'drive_y_win': filtered_y.copy(),
+        't_win': t.copy(),
+        'window_start_idx': 0,
         'samples_per_bin': samples_per_bin,
         'n_bins': n_bins,
         'n_receptors': filtered_x.shape[0],
@@ -201,13 +311,16 @@ def _build_trial_noise_bank(n_trials, processed_cache, lif_model, rng):
     return bank
 
 
-def _simulate_trial_response_cached(processed_cache, lif_model, gamma, sigma_n, trial_noise, include_mechanistic=False):
+def _simulate_trial_response_cached(processed_cache, lif_model, gamma, sigma_n, trial_noise):
     use_gpu = _is_gpu_array(processed_cache['filtered_x']) or _is_gpu_array(processed_cache['filtered_y'])
     xp = cp if use_gpu else np
+
     current_x = gamma * processed_cache['filtered_x'] + sigma_n * xp.asarray(trial_noise['input_noise_x_unit'])
     current_y = gamma * processed_cache['filtered_y'] + sigma_n * xp.asarray(trial_noise['input_noise_y_unit'])
+
     thresholds_x = xp.asarray(trial_noise['thresholds_x']) if use_gpu else trial_noise['thresholds_x']
     thresholds_y = xp.asarray(trial_noise['thresholds_y']) if use_gpu else trial_noise['thresholds_y']
+
     binned_x, binned_y = lif_model.run_binned(
         current_x,
         current_y,
@@ -216,76 +329,77 @@ def _simulate_trial_response_cached(processed_cache, lif_model, gamma, sigma_n, 
         thresholds_x=thresholds_x,
         thresholds_y=thresholds_y,
     )
+
     response_vector = xp.stack((binned_x, binned_y), axis=1).reshape(-1)
-    result = {'response_vector': response_vector}
-    if include_mechanistic:
-        spikes_x = xp.repeat(binned_x, processed_cache['samples_per_bin'], axis=1) / processed_cache['samples_per_bin']
-        spikes_y = xp.repeat(binned_y, processed_cache['samples_per_bin'], axis=1) / processed_cache['samples_per_bin']
-        mechanistic = decoder.compute_mechanistic_metrics(
-            spikes_x,
-            spikes_y,
-            processed_cache['drive_x_win'],
-            processed_cache['drive_y_win'],
-            processed_cache['t_win'],
-            receptor_coords,
-            f0=config.PHASE_LOCK_F0_HZ,
-        )
-        result['mechanistic'] = mechanistic
-    return result
+    return {'response_vector': response_vector}
 
+def _compute_condition_mechanistic(processed_cache, lif_model, gamma):
+    use_gpu = _is_gpu_array(processed_cache['filtered_x']) or _is_gpu_array(processed_cache['filtered_y'])
+    xp = cp if use_gpu else np
 
-def _build_baseline_processed(method_template):
-    zeros_x = np.zeros_like(method_template['stress_xz'], dtype=np.float64)
-    zeros_y = np.zeros_like(method_template['stress_yz'], dtype=np.float64)
-    return stress_processor.process(
-        zeros_x,
-        zeros_y,
-        method_template['roi_x'],
-        method_template['roi_y'],
+    current_x = gamma * processed_cache['filtered_x']
+    current_y = gamma * processed_cache['filtered_y']
+
+    spikes_x, spikes_y = lif_model.run(current_x, current_y)
+
+    start = processed_cache['window_start_idx']
+    stop = start + processed_cache['drive_x_win'].shape[1]
+
+    spikes_x_win = xp.asarray(spikes_x[:, start:stop], dtype=xp.float64)
+    spikes_y_win = xp.asarray(spikes_y[:, start:stop], dtype=xp.float64)
+
+    return decoder.compute_mechanistic_metrics(
+        spikes_x_win,
+        spikes_y_win,
+        processed_cache['drive_x_win'],
+        processed_cache['drive_y_win'],
+        processed_cache['t_win'],
         receptor_coords,
-        input_dt,
+        f0=config.PHASE_LOCK_F0_HZ,
     )
-
-
-def _build_calibration_processed(method_template):
-    processed_variants = []
-    for item in _generate_calibration_scales():
-        processed_variants.append({
-            'label': item['label'],
-            'freq_hz': item['freq_hz'],
-            'amp_scale': item['amp_scale'],
-            'processed': stress_processor.process(
-                np.asarray(method_template['stress_xz'], dtype=np.float64) * item['amp_scale'],
-                np.asarray(method_template['stress_yz'], dtype=np.float64) * item['amp_scale'],
-                method_template['roi_x'],
-                method_template['roi_y'],
-                receptor_coords,
-                input_dt,
-            ),
-        })
-    return processed_variants
-
 
 def _calibration_objective(params, calibration_variants, baseline_cache, baseline_noise_bank, lif_model):
     gamma, sigma_n = params
-    baseline_matrix = _make_response_matrix([
-        _simulate_trial_response_cached(
+
+    baseline_vectors = [
+        _to_numpy(_simulate_trial_response_cached(
             baseline_cache,
             lif_model,
             gamma,
             sigma_n,
             noise,
-            include_mechanistic=False,
-        )['response_vector']
+        )['response_vector'])
         for noise in baseline_noise_bank
-    ])
-    baseline_pca_fit = decoder.fit_pca(baseline_matrix, variance_ratio=min(config.PCA_VARIANCE_RATIO, 0.99))
-    baseline_projected = decoder.transform_pca(baseline_matrix)
+    ]
+    baseline_matrix = np.asarray(baseline_vectors, dtype=np.float64)
+
+    stim_matrices = {}
+    for item in calibration_variants:
+        stim_vectors = [
+            _to_numpy(_simulate_trial_response_cached(
+                item['cache'],
+                lif_model,
+                gamma,
+                sigma_n,
+                noise,
+            )['response_vector'])
+            for noise in item['noise_bank']
+        ]
+        stim_matrices[item['label']] = np.asarray(stim_vectors, dtype=np.float64)
+
+    pca_input = _stack_residual_matrices(
+        [baseline_matrix] + [stim_matrices[item['label']] for item in calibration_variants]
+    )
+    baseline_pca_fit = decoder.fit_pca(pca_input, variance_ratio=min(config.PCA_VARIANCE_RATIO, 0.99))
+
+    baseline_projected = _to_numpy(decoder.transform_pca(baseline_matrix))
     mu0 = baseline_projected.mean(axis=0)
     sigma0 = _ensure_2d_cov(decoder.compute_covariance(baseline_projected, reg_eps=config.COVARIANCE_REG_EPS))
-    sigma0_inv = np.linalg.inv(sigma0)
+    sigma0 = _to_numpy(sigma0)
+    sigma0_inv = np.linalg.pinv(sigma0)
+
     baseline_scores = _pair_mahalanobis_scores(baseline_projected, mu0, sigma0_inv)
-    baseline_median = float(np.median(baseline_scores))
+    baseline_median = float(np.median(_to_numpy(baseline_scores)))
 
     monotonic_penalty = 0.0
     frequency_penalty = 0.0
@@ -293,20 +407,13 @@ def _calibration_objective(params, calibration_variants, baseline_cache, baselin
     by_freq = {}
 
     for item in calibration_variants:
-        projected = decoder.transform_pca(_make_response_matrix([
-            _simulate_trial_response_cached(
-                item['cache'],
-                lif_model,
-                gamma,
-                sigma_n,
-                noise,
-                include_mechanistic=False,
-            )['response_vector']
-            for noise in item['noise_bank']
-        ]))
+        projected = _to_numpy(decoder.transform_pca(stim_matrices[item['label']]))
         scores = _pair_mahalanobis_scores(projected, mu0, sigma0_inv)
+        scores = _to_numpy(scores)
+
         detect_prob = float(np.mean(scores > baseline_median))
         target = _calibration_target_probability(item['freq_hz'], item['amp_scale'])
+
         fit_penalty += (detect_prob - target) ** 2
         by_freq.setdefault(item['freq_hz'], []).append((item['amp_scale'], detect_prob))
 
@@ -325,10 +432,12 @@ def _calibration_objective(params, calibration_variants, baseline_cache, baselin
             frequency_penalty += (p400 - p200) ** 2
 
     objective = fit_penalty + 10.0 * monotonic_penalty + 10.0 * frequency_penalty
+
     return objective, {
         'gamma': float(gamma),
         'sigma_n': float(sigma_n),
         'baseline_pca': baseline_pca_fit,
+        'detect_table': {float(freq): sorted(seq, key=lambda x: x[0]) for freq, seq in by_freq.items()},
     }
 
 
@@ -409,21 +518,28 @@ def _calibrate_global_parameters(calibration_variants, baseline_cache, lif_model
     print(
         f"Calibration complete: gamma={best['gamma']:.6f}, sigma_n={best['sigma_n']:.6f}, objective={best['objective']:.6f}"
     )
+    for freq, seq in sorted(best["details"]["detect_table"].items()):
+        summary = ", ".join([f"{amp:.2f}->{prob:.3f}" for amp, prob in seq])
+        print(f"  Calib detect probs @ {freq:.0f} Hz: {summary}")
+    all_detect_probs = []
+    for _, seq in sorted(best['details']['detect_table'].items()):
+        all_detect_probs.extend([prob for _, prob in seq])
+    all_detect_probs = np.asarray(all_detect_probs, dtype=np.float64)
+
+    n_ceil = int(np.sum(all_detect_probs >= 0.95))
+    n_floor = int(np.sum(all_detect_probs <= 0.05))
+    print(f"  Calibration saturation diagnostic: ceil={n_ceil}/{all_detect_probs.size}, floor={n_floor}/{all_detect_probs.size}")
     print("All parameters were fixed before predicting Experiment 1 pairwise choices.")
     return best
 
 
 def _collect_condition_trials(name, processed_cache, lif_model, gamma, sigma_n, n_trials, seed):
+    mechanistic = _compute_condition_mechanistic(processed_cache, lif_model, gamma)
+
     rng = np.random.default_rng(seed)
     noise_bank = _build_trial_noise_bank(n_trials, processed_cache, lif_model, rng)
+
     response_vectors = []
-    mechanistic_sum = {
-        'mean_ffi': 0.0,
-        'ndwci': 0.0,
-        'dwci': 0.0,
-        'rho_mean': 0.0,
-        'rho_max': 0.0,
-    }
     for noise in noise_bank:
         trial = _simulate_trial_response_cached(
             processed_cache,
@@ -431,32 +547,43 @@ def _collect_condition_trials(name, processed_cache, lif_model, gamma, sigma_n, 
             gamma,
             sigma_n,
             noise,
-            include_mechanistic=True,
         )
         response_vectors.append(trial['response_vector'])
-        mech = trial['mechanistic']
-        mechanistic_sum['mean_ffi'] += float(mech['mean_ffi'])
-        mechanistic_sum['ndwci'] += float(mech['ndwci'])
-        mechanistic_sum['dwci'] += float(mech['dwci'])
-        mechanistic_sum['rho_mean'] += float(mech['rho_mean'])
-        mechanistic_sum['rho_max'] += float(mech['rho_max'])
-    trial_count = max(1, len(response_vectors))
+
     return {
         'name': name,
         'response_matrix': _make_response_matrix(response_vectors),
-        'mechanistic': {
-            'mean_ffi': mechanistic_sum['mean_ffi'] / trial_count,
-            'ndwci': mechanistic_sum['ndwci'] / trial_count,
-            'dwci': mechanistic_sum['dwci'] / trial_count,
-            'rho_mean': mechanistic_sum['rho_mean'] / trial_count,
-            'rho_max': mechanistic_sum['rho_max'] / trial_count,
-        },
+        'mechanistic': mechanistic,
     }
 
+def _compute_trial_clarity_scores(projected_trials, mu_pos_x, mu_neg_x, mu_pos_y, mu_neg_y, sigma_cond):
+    xp = cp if (
+        _is_gpu_array(projected_trials)
+        or _is_gpu_array(mu_pos_x)
+        or _is_gpu_array(mu_neg_x)
+        or _is_gpu_array(mu_pos_y)
+        or _is_gpu_array(mu_neg_y)
+        or _is_gpu_array(sigma_cond)
+    ) else np
+
+    Z = xp.asarray(projected_trials, dtype=xp.float64)
+    sigma_inv = xp.linalg.pinv(xp.asarray(sigma_cond, dtype=xp.float64))
+
+    def sq_mahal_to(mu):
+        delta = Z - xp.asarray(mu, dtype=xp.float64)
+        return xp.einsum('ij,jk,ik->i', delta, sigma_inv, delta, optimize=True)
+
+    d_px = sq_mahal_to(mu_pos_x)
+    d_nx = sq_mahal_to(mu_neg_x)
+    d_py = sq_mahal_to(mu_pos_y)
+    d_ny = sq_mahal_to(mu_neg_y)
+
+    return 0.25 * (d_px + d_nx + d_py + d_ny)
 
 def _project_all_conditions(condition_trials):
     all_vectors = [item['response_matrix'] for item in condition_trials.values()]
-    pca_info = decoder.fit_pca(np.vstack(all_vectors), variance_ratio=config.PCA_VARIANCE_RATIO)
+    pca_input = _stack_residual_matrices(all_vectors)
+    pca_info = decoder.fit_pca(pca_input, variance_ratio=config.PCA_VARIANCE_RATIO)
     print(
         f"PCA retained {pca_info['n_components']} components, explained variance={pca_info['explained_variance_ratio']:.4f}"
     )
@@ -468,10 +595,10 @@ def _project_all_conditions(condition_trials):
         }
     return projected
 
-
 def _compute_trial_metrics(projected_conditions):
     baseline = projected_conditions[config.BASELINE_CONDITION_NAME]['projected']
     xp = cp if _is_gpu_array(baseline) else np
+
     mu0 = baseline.mean(axis=0)
     sigma0 = _ensure_2d_cov(decoder.compute_covariance(baseline, reg_eps=config.COVARIANCE_REG_EPS))
 
@@ -480,15 +607,17 @@ def _compute_trial_metrics(projected_conditions):
         base = projected_conditions[method]['projected']
         mu = base.mean(axis=0)
         sigma = _ensure_2d_cov(decoder.compute_covariance(base, reg_eps=config.COVARIANCE_REG_EPS))
+
         delta = base - mu0
-        solved_delta = xp.linalg.solve(sigma0, delta.T).T
-        intensity_trials = xp.sum(delta * solved_delta, axis=1)
+        sigma0_inv = xp.linalg.pinv(sigma0)
+        intensity_trials = xp.einsum('ij,jk,ik->i', delta, sigma0_inv, delta, optimize=True)
 
         mu_px = projected_conditions[f'{method}__pos_x']['projected'].mean(axis=0)
         mu_nx = projected_conditions[f'{method}__neg_x']['projected'].mean(axis=0)
         mu_py = projected_conditions[f'{method}__pos_y']['projected'].mean(axis=0)
         mu_ny = projected_conditions[f'{method}__neg_y']['projected'].mean(axis=0)
-        clarity_scalar, fisher = decoder.compute_fisher_clarity(
+
+        fisher_clarity, fisher = decoder.compute_fisher_clarity(
             mu_px,
             mu_nx,
             mu_py,
@@ -496,17 +625,29 @@ def _compute_trial_metrics(projected_conditions):
             sigma,
             config.POSITION_DELTA_MM,
         )
-        clarity_trials = xp.full(base.shape[0], clarity_scalar, dtype=xp.float64)
+
+        clarity_trials = _compute_trial_clarity_scores(
+            base,
+            mu_px,
+            mu_nx,
+            mu_py,
+            mu_ny,
+            sigma,
+        )
+
         intensity_mean = decoder.compute_detectability(mu, mu0, sigma0)
+        clarity_mean = float(xp.mean(clarity_trials).item() if xp is cp else xp.mean(clarity_trials))
 
         results[method] = {
             'intensity_trials': intensity_trials,
             'clarity_trials': clarity_trials,
             'intensity_mean': float(intensity_mean),
-            'clarity_mean': float(clarity_scalar),
+            'clarity_mean': float(clarity_mean),
+            'fisher_clarity': float(fisher_clarity),
             'fisher_matrix': fisher,
             'mechanistic': projected_conditions[method]['mechanistic'],
         }
+
     return results
 
 
@@ -603,15 +744,58 @@ def _run_single_seed(seed, methods_data, input_dt_value, gpu_ready):
     )
 
     samples_per_bin = _bin_sample_count()
-    reference_method = methods_data[config.STIMULUS_METHODS[0]]
-    baseline_cache = _precompute_processed_cache(_build_baseline_processed(reference_method), samples_per_bin)
+
+    # 1) 先构建真实实验中心条件缓存（未归一化）
+    raw_center_caches = {}
+    for method in config.STIMULUS_METHODS:
+        if method not in methods_data:
+            continue
+        method_data = methods_data[method]
+        raw_center_caches[method] = _precompute_processed_cache(
+            stress_processor.process(
+                method_data['stress_xz'],
+                method_data['stress_yz'],
+                method_data['roi_x'],
+                method_data['roi_y'],
+                receptor_coords,
+                input_dt,
+            ),
+            samples_per_bin,
+        )
+
+    # 2) 估计统一 drive scale
+    drive_scale = _estimate_drive_scale(raw_center_caches)
+    print(f"Drive normalization scale: {drive_scale:.6e}")
+
+    # 3) 归一化真实中心缓存
+    center_caches = {
+        method: _normalize_processed_cache(cache, drive_scale)
+        for method, cache in raw_center_caches.items()
+    }
+
+    # 4) 基于真实实验构建 calibration 空间模板
+    calibration_template = _build_calibration_spatial_template(center_caches)
+
+    # 5) 构建 calibration baseline / stimuli
+    baseline_cache = _build_synthetic_calibration_cache(
+        freq_hz=config.CALIBRATION_AM_FREQUENCIES_HZ[0],
+        amp_scale=0.0,
+        spatial_template=calibration_template,
+        samples_per_bin=samples_per_bin,
+    )
+
     calibration_variants = []
-    for item in _build_calibration_processed(reference_method):
+    for item in _generate_calibration_scales():
         calibration_variants.append({
             'label': item['label'],
             'freq_hz': item['freq_hz'],
             'amp_scale': item['amp_scale'],
-            'cache': _precompute_processed_cache(item['processed'], samples_per_bin),
+            'cache': _build_synthetic_calibration_cache(
+                freq_hz=item['freq_hz'],
+                amp_scale=item['amp_scale'],
+                spatial_template=calibration_template,
+                samples_per_bin=samples_per_bin,
+            ),
         })
 
     calibration = _calibrate_global_parameters(
@@ -639,17 +823,7 @@ def _run_single_seed(seed, methods_data, input_dt_value, gpu_ready):
         if method not in methods_data:
             continue
         method_data = methods_data[method]
-        center_cache = _precompute_processed_cache(
-            stress_processor.process(
-                method_data['stress_xz'],
-                method_data['stress_yz'],
-                method_data['roi_x'],
-                method_data['roi_y'],
-                receptor_coords,
-                input_dt,
-            ),
-            samples_per_bin,
-        )
+        center_cache = center_caches[method]
         condition_trials[method] = _collect_condition_trials(
             method,
             center_cache,
@@ -661,7 +835,7 @@ def _run_single_seed(seed, methods_data, input_dt_value, gpu_ready):
         )
         condition_trials[f'{method}__pos_x'] = _collect_condition_trials(
             f'{method}__pos_x',
-            _precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_x=+config.POSITION_DELTA_MM), samples_per_bin),
+            _normalize_processed_cache(_precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_x=+config.POSITION_DELTA_MM), samples_per_bin), drive_scale),
             lif_model,
             gamma,
             sigma_n,
@@ -670,7 +844,7 @@ def _run_single_seed(seed, methods_data, input_dt_value, gpu_ready):
         )
         condition_trials[f'{method}__neg_x'] = _collect_condition_trials(
             f'{method}__neg_x',
-            _precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_x=-config.POSITION_DELTA_MM), samples_per_bin),
+            _normalize_processed_cache(_precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_x=-config.POSITION_DELTA_MM), samples_per_bin), drive_scale),
             lif_model,
             gamma,
             sigma_n,
@@ -679,7 +853,7 @@ def _run_single_seed(seed, methods_data, input_dt_value, gpu_ready):
         )
         condition_trials[f'{method}__pos_y'] = _collect_condition_trials(
             f'{method}__pos_y',
-            _precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_y=+config.POSITION_DELTA_MM), samples_per_bin),
+            _normalize_processed_cache(_precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_y=+config.POSITION_DELTA_MM), samples_per_bin), drive_scale),
             lif_model,
             gamma,
             sigma_n,
@@ -688,7 +862,7 @@ def _run_single_seed(seed, methods_data, input_dt_value, gpu_ready):
         )
         condition_trials[f'{method}__neg_y'] = _collect_condition_trials(
             f'{method}__neg_y',
-            _precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_y=-config.POSITION_DELTA_MM), samples_per_bin),
+            _normalize_processed_cache(_precompute_processed_cache(_build_shifted_processed(method_data, delta_mm_y=-config.POSITION_DELTA_MM), samples_per_bin), drive_scale),
             lif_model,
             gamma,
             sigma_n,
@@ -724,6 +898,7 @@ def _aggregate_runs(all_runs):
         aggregated_methods[method] = {
             'intensity_mean': float(np.median([item['intensity_mean'] for item in method_runs])),
             'clarity_mean': float(np.median([item['clarity_mean'] for item in method_runs])),
+            'fisher_clarity': float(np.median([item['fisher_clarity'] for item in method_runs])),
             'mechanistic': {
                 'mean_ffi': float(np.median([item['mechanistic']['mean_ffi'] for item in method_runs])),
                 'ndwci': float(np.median([item['mechanistic']['ndwci'] for item in method_runs])),

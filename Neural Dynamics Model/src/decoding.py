@@ -129,7 +129,7 @@ class PopulationDecoder:
         return ndwci, energy_no_dc
 
     def compute_mechanistic_metrics(self, spikes_x, spikes_y, drive_x, drive_y, t_vec, receptor_coords, f0=200.0):
-        fidelity_weights = self.compute_frequency_fidelity(drive_x, drive_y, target_freq_hz=f0)
+        fidelity_weights = self.compute_frequency_fidelity(drive_x, drive_y, t_vec, target_freq_hz=f0)
         qx_complex, qy_complex = self.build_vector_phase_field(
             spikes_x,
             spikes_y,
@@ -201,19 +201,26 @@ class PopulationDecoder:
         X = xp.asarray(response_matrix, dtype=xp.float64)
         return (X - self._pca_mean) @ self._pca_components.T
 
-    def compute_covariance(self, response_matrix, reg_eps=1e-6):
+    def compute_covariance(self, response_matrix, reg_eps=1e-3):
         xp = self._xp()
         X = xp.asarray(response_matrix, dtype=xp.float64)
+
         if X.ndim != 2:
             raise ValueError("response_matrix must be 2D")
+
         if X.shape[0] <= 1:
-            cov = xp.eye(X.shape[1], dtype=xp.float64) * reg_eps
+            cov = xp.eye(X.shape[1], dtype=xp.float64)
         else:
             cov = xp.cov(X, rowvar=False)
             if cov.ndim == 0:
                 cov = xp.asarray([[self._to_float(cov)]], dtype=xp.float64)
+
         cov = xp.asarray(cov, dtype=xp.float64)
-        cov += xp.eye(cov.shape[0], dtype=xp.float64) * reg_eps
+
+        diag_scale = self._to_float(xp.trace(cov) / max(cov.shape[0], 1))
+        diag_scale = max(diag_scale, 1.0)
+
+        cov += xp.eye(cov.shape[0], dtype=xp.float64) * (reg_eps * diag_scale)
         return cov
 
     @staticmethod
@@ -222,9 +229,14 @@ class PopulationDecoder:
             isinstance(mu_stim, cp.ndarray) or isinstance(mu_base, cp.ndarray) or isinstance(sigma_base, cp.ndarray)
         )
         xp = cp if use_gpu else np
+
         delta = xp.asarray(mu_stim, dtype=xp.float64) - xp.asarray(mu_base, dtype=xp.float64)
-        solved = xp.linalg.solve(xp.asarray(sigma_base, dtype=xp.float64), delta)
-        return float((delta.T @ solved).item() if use_gpu else (delta.T @ solved))
+        sigma_arr = xp.asarray(sigma_base, dtype=xp.float64)
+        sigma_inv = xp.linalg.pinv(sigma_arr)
+        value = delta.T @ sigma_inv @ delta
+
+        scalar = float(value.item() if use_gpu else value)
+        return max(scalar, 0.0)
 
     @staticmethod
     def compute_fisher_clarity(mu_pos_x, mu_neg_x, mu_pos_y, mu_neg_y, sigma_cond, delta_mm):
@@ -236,38 +248,55 @@ class PopulationDecoder:
             or isinstance(sigma_cond, cp.ndarray)
         )
         xp = cp if use_gpu else np
+
         denom = 2.0 * float(delta_mm)
+
         g_x = (xp.asarray(mu_pos_x, dtype=xp.float64) - xp.asarray(mu_neg_x, dtype=xp.float64)) / denom
         g_y = (xp.asarray(mu_pos_y, dtype=xp.float64) - xp.asarray(mu_neg_y, dtype=xp.float64)) / denom
+
         sigma_arr = xp.asarray(sigma_cond, dtype=xp.float64)
-        sigma_inv_gx = xp.linalg.solve(sigma_arr, g_x)
-        sigma_inv_gy = xp.linalg.solve(sigma_arr, g_y)
-        j11 = float((g_x.T @ sigma_inv_gx).item() if use_gpu else (g_x.T @ sigma_inv_gx))
-        j12 = float((g_x.T @ sigma_inv_gy).item() if use_gpu else (g_x.T @ sigma_inv_gy))
-        j21 = float((g_y.T @ sigma_inv_gx).item() if use_gpu else (g_y.T @ sigma_inv_gx))
-        j22 = float((g_y.T @ sigma_inv_gy).item() if use_gpu else (g_y.T @ sigma_inv_gy))
+        sigma_inv = xp.linalg.pinv(sigma_arr)
+
+        j11 = float((g_x.T @ sigma_inv @ g_x).item() if use_gpu else (g_x.T @ sigma_inv @ g_x))
+        j12 = float((g_x.T @ sigma_inv @ g_y).item() if use_gpu else (g_x.T @ sigma_inv @ g_y))
+        j21 = float((g_y.T @ sigma_inv @ g_x).item() if use_gpu else (g_y.T @ sigma_inv @ g_x))
+        j22 = float((g_y.T @ sigma_inv @ g_y).item() if use_gpu else (g_y.T @ sigma_inv @ g_y))
+
         fisher = xp.asarray([[j11, j12], [j21, j22]], dtype=xp.float64)
         det_scalar = float(xp.linalg.det(fisher).item() if use_gpu else xp.linalg.det(fisher))
         det_val = max(det_scalar, 0.0)
+
         return float(np.sqrt(det_val)), PopulationDecoder.to_numpy(fisher)
 
-    def compute_frequency_fidelity(self, drive_x, drive_y, target_freq_hz=200.0):
-        drive_x = self.to_numpy(drive_x)
-        drive_y = self.to_numpy(drive_y)
-        n_time = drive_x.shape[1]
-        if n_time <= 0:
-            raise ValueError("Drive must contain at least one sample.")
-        t_vec = np.arange(n_time, dtype=np.float64)
+    def compute_frequency_fidelity(self, drive_x, drive_y, t_vec, target_freq_hz=200.0):
+        drive_x = self.to_numpy(drive_x).astype(np.float64, copy=False)
+        drive_y = self.to_numpy(drive_y).astype(np.float64, copy=False)
+        t = self.to_numpy(t_vec).astype(np.float64, copy=False).ravel()
+
+        if drive_x.shape != drive_y.shape:
+            raise ValueError(f"Drive shape mismatch: {drive_x.shape} vs {drive_y.shape}")
+        if drive_x.shape[1] != t.size:
+            raise ValueError(f"Time vector length mismatch: drive has {drive_x.shape[1]} samples, t_vec has {t.size}")
+
+        # 去直流，避免 DC 污染频率投影
+        drive_x = drive_x - np.mean(drive_x, axis=1, keepdims=True)
+        drive_y = drive_y - np.mean(drive_y, axis=1, keepdims=True)
+
         power_sum = None
         target_power = None
+
         for freq in self.fidelity_freqs_hz:
-            phase = np.exp(-1j * 2.0 * np.pi * float(freq) * t_vec / float(n_time))
-            coeff_x = np.sum(drive_x * phase[None, :], axis=1)
-            coeff_y = np.sum(drive_y * phase[None, :], axis=1)
+            phase = np.exp(-1j * 2.0 * np.pi * float(freq) * t)
+            coeff_x = drive_x @ phase
+            coeff_y = drive_y @ phase
             power = np.abs(coeff_x) ** 2 + np.abs(coeff_y) ** 2
-            if int(round(freq)) == int(round(target_freq_hz)):
+
+            if abs(float(freq) - float(target_freq_hz)) < 1e-9:
                 target_power = power
+
             power_sum = power if power_sum is None else (power_sum + power)
+
         if target_power is None:
             raise ValueError("target_freq_hz must be included in fidelity_freqs_hz")
+
         return target_power / (power_sum + 1e-12)
