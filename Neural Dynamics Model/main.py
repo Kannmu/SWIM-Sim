@@ -8,6 +8,7 @@ from src.topography import ReceptorArray
 from src.mechanics import StressProcessor
 from src.neuron import LIFModel
 from src.decoding import PopulationDecoder
+
 try:
     import cupy as cp
 except Exception:
@@ -28,6 +29,16 @@ def _to_int(x):
     if _is_gpu_array(x):
         return int(x.item())
     return int(x)
+
+
+def _median_active_rate_hz(spike_counts, duration_s):
+    active_counts = spike_counts[spike_counts > 0]
+    if active_counts.size == 0:
+        return 0.0
+    rates = active_counts / duration_s
+    if _is_gpu_array(rates):
+        return _to_float(cp.median(rates))
+    return float(np.median(rates))
 
 
 def main():
@@ -69,6 +80,7 @@ def main():
         f_low=config.F_LOW_HZ,
         f_high=config.F_HIGH_HZ,
         spatial_sigma=config.SPATIAL_SIGMA_MM,
+        pca_window_ms=config.PCA_STEADY_STATE_WINDOW_MS,
         use_gpu=gpu_ready
     )
 
@@ -96,9 +108,9 @@ def main():
         return
 
     calib_data = methods_data[config.CALIBRATION_METHOD]
-
-    S_calib, t_calib, _ = stress_processor.process(
-        calib_data['stress_magnitude'],
+    s_calib, t_calib, _ = stress_processor.process(
+        calib_data['stress_xz'],
+        calib_data['stress_yz'],
         calib_data['roi_x'],
         calib_data['roi_y'],
         receptor_coords,
@@ -106,51 +118,29 @@ def main():
     )
 
     target_rate_per_ms = config.CALIBRATION_TARGET_RATE / config.CALIBRATION_CYCLE_MS
-    target_hz = target_rate_per_ms * 1000
+    target_hz = target_rate_per_ms * 1000.0
+    gamma = float(config.GLOBAL_GAIN)
+    duration_s = len(t_calib) / config.FS_MODEL
 
-    if _is_gpu_array(S_calib):
-        S_calib_pos = cp.where(S_calib > 0.0, S_calib, 0.0)
-    else:
-        S_calib_pos = np.where(S_calib > 0.0, S_calib, 0.0)
+    initial_currents = lif.compute_current(s_calib, gamma)
+    initial_counts = lif.run_counts(initial_currents)
+    initial_rate = _median_active_rate_hz(initial_counts, duration_s)
+    print(f"Initial Gamma={gamma:.4f} -> Median Rate={initial_rate:.2f} Hz")
 
-    gamma = 1.0
-    currents = S_calib_pos * gamma
-    spike_counts = lif.run_counts(currents)
-
-    duration_ms = _to_float(t_calib[-1]) * 1000.0
-    rates_hz = spike_counts / (duration_ms / 1000.0)
-
-    active_rates = rates_hz[rates_hz > 10]
-    if active_rates.size == 0:
-        median_rate = 0
-    else:
-        median_rate = _to_float(cp.median(active_rates) if _is_gpu_array(active_rates) else np.median(active_rates))
-
-    print(f"Initial Gamma={gamma:.4f} -> Median Rate={median_rate:.2f} Hz")
-
-    if median_rate < 1.0:
+    if initial_rate < 1.0:
         gamma = 100.0
 
-    # Precompute duration once to avoid repeated identical work
-    duration_s = len(t_calib) * (1.0 / config.FS_MODEL)
-
     for i in range(20):
-        currents = S_calib_pos * gamma
+        currents = lif.compute_current(s_calib, gamma)
         spike_counts = lif.run_counts(currents)
-        active_counts = spike_counts[spike_counts > 0]
+        median_rate = _median_active_rate_hz(spike_counts, duration_s)
 
-        if active_counts.size == 0:
-            median_rate = 0.0
-        else:
-            rates = active_counts / duration_s
-            median_rate = _to_float(cp.median(rates) if _is_gpu_array(rates) else np.median(rates))
-
-        print(f"Iter {i + 1}: Gamma={gamma:.4f} -> Median Rate={median_rate:.2f} Hz (Target: {target_hz} Hz)")
+        print(f"Iter {i + 1}: Gamma={gamma:.4f} -> Median Rate={median_rate:.2f} Hz (Target: {target_hz:.2f} Hz)")
 
         if abs(median_rate - target_hz) < 10.0:
             break
 
-        if median_rate == 0:
+        if median_rate == 0.0:
             gamma *= 2.0
         else:
             gamma *= (target_hz / (median_rate + 1e-5))
@@ -167,37 +157,25 @@ def main():
 
         m_data = methods_data[method_name]
 
-        S_filt, t_vec, S_raw = stress_processor.process(
-            m_data['stress_magnitude'],
+        s_filt, t_vec, s_raw = stress_processor.process(
+            m_data['stress_xz'],
+            m_data['stress_yz'],
             m_data['roi_x'],
             m_data['roi_y'],
             receptor_coords,
             input_dt
         )
 
-        max_signal = _to_float(cp.max(S_filt) if _is_gpu_array(S_filt) else np.max(S_filt))
-        print(f"\nMethod {method_name}: Max Filtered Signal = {max_signal:.2f}")
+        max_signal = _to_float(cp.max(s_filt) if _is_gpu_array(s_filt) else np.max(s_filt))
+        s_min = _to_float(cp.min(s_filt) if _is_gpu_array(s_filt) else np.min(s_filt))
+        s_mean = _to_float(cp.mean(s_filt) if _is_gpu_array(s_filt) else np.mean(s_filt))
+        print(f"\nMethod {method_name}: Signed filtered signal stats min={s_min:.4f}, mean={s_mean:.4f}, max={max_signal:.4f}")
 
-        # DEBUG: Log S_filt stats
-        s_min = _to_float(cp.min(S_filt) if _is_gpu_array(S_filt) else np.min(S_filt))
-        s_mean = _to_float(cp.mean(S_filt) if _is_gpu_array(S_filt) else np.mean(S_filt))
-        print(f"DEBUG: S_filt stats: min={s_min:.4f}, mean={s_mean:.4f}, max={max_signal:.4f}")
-        
-        # DEBUG: Log t_vec info
-        t_len = len(t_vec)
-        if t_len > 1:
-            dt_step = _to_float(t_vec[1] - t_vec[0])
-            print(f"DEBUG: t_vec: len={t_len}, start={_to_float(t_vec[0]):.4f}, end={_to_float(t_vec[-1]):.4f}, dt={dt_step:.6f}")
-        else:
-            print(f"DEBUG: t_vec length is {t_len}")
-
-        currents = lif.compute_current(S_filt, gamma)
-        
-        # DEBUG: Log currents stats
+        currents = lif.compute_current(s_filt, gamma)
         c_max = _to_float(cp.max(currents) if _is_gpu_array(currents) else np.max(currents))
         c_mean = _to_float(cp.mean(currents) if _is_gpu_array(currents) else np.mean(currents))
         print(f"DEBUG: Currents stats: mean={c_mean:.4f}, max={c_max:.4f} (Gamma={gamma:.4f})")
-        
+
         spikes = lif.run(currents)
 
         t_end = _to_float(t_vec[-1])
@@ -207,24 +185,21 @@ def main():
         else:
             win_idx = np.flatnonzero(t_vec >= t_start_win)
 
-        # DEBUG: Log window info
         print(f"DEBUG: Window analysis: start={t_start_win:.4f}, end={t_end:.4f}, num_samples={len(win_idx)}")
 
         spikes_win = spikes[:, win_idx]
-        if _is_gpu_array(spikes_win):
-            spike_counts_win = cp.sum(spikes_win, axis=1)
-        else:
-            spike_counts_win = np.sum(spikes_win, axis=1)
+        t_win = t_vec[win_idx]
+        phase_weights = decoder.compute_phase_locked_weight(
+            spikes_win,
+            t_win,
+            f0=config.PHASE_LOCK_F0_HZ
+        )
+        intensity, clarity, density_map = decoder.compute_core_map_metrics(phase_weights, receptor_coords)
 
-        # DEBUG: Log spike stats
-        total_spikes = _to_int(cp.sum(spike_counts_win) if _is_gpu_array(spike_counts_win) else np.sum(spike_counts_win))
-        max_spikes = _to_int(cp.max(spike_counts_win) if _is_gpu_array(spike_counts_win) else np.max(spike_counts_win))
-        print(f"DEBUG: Spikes in window: total={total_spikes}, max_per_neuron={max_spikes}")
-
-        intensity = _to_float(cp.sum(spike_counts_win) if _is_gpu_array(spike_counts_win) else np.sum(spike_counts_win))
-        clarity = decoder.compute_spatial_clarity_from_counts(spike_counts_win, receptor_coords)
-
-        S_raw_win = S_raw[:, win_idx]
+        total_spikes = _to_int(cp.sum(spikes_win) if _is_gpu_array(spikes_win) else np.sum(spikes_win))
+        q_max = _to_float(cp.max(phase_weights) if _is_gpu_array(phase_weights) else np.max(phase_weights))
+        rho_max = _to_float(cp.max(density_map) if _is_gpu_array(density_map) else np.max(density_map))
+        print(f"DEBUG: Spikes in window total={total_spikes}, max_phase_weight={q_max:.4f}, rho_max={rho_max:.4f}")
 
         results_summary[method_name] = {
             'Intensity': intensity,
@@ -237,9 +212,7 @@ def main():
     for name in config.STIMULUS_METHODS:
         if name in results_summary:
             res = results_summary[name]
-            print(f"{name:<10} | {res['Intensity']:<10.1f} | {res['SpatialClarity']:<10.3f}")
-
-
+            print(f"{name:<10} | {res['Intensity']:<10.3f} | {res['SpatialClarity']:<10.3f}")
 
     print("\nDone.")
 

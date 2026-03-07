@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
-from scipy.signal import get_window
+from scipy.signal import get_window, welch
 
 # =============================================================================
 # Configuration
@@ -62,7 +62,14 @@ WAVEFORM_RIGHT_MARGIN = 0.95  # Defines the right boundary (0 to 1) for the plot
 # Comparison Plot Colors
 # Specify the colormap name (Seaborn or Matplotlib). 
 # Examples: 'tab10', 'deep', 'viridis', 'magma', 'coolwarm'
-COMPARISON_COLORMAP = 'tab10'
+COMPARISON_COLORMAP = 'viridis'
+
+# Comparison Metric Settings
+METHOD_ORDER = ['ULM_L', 'DLM_2', 'DLM_3', 'LM_C', 'LM_L']
+TARGET_FREQUENCIES = [200, 400, 600, 800]
+FREQUENCY_BAND_HALF_WIDTH = 20  # Hz
+RIDGE_TOP_PERCENTILE = 80
+RIDGE_MIN_POINTS = 5
 
 # =============================================================================
 # Setup
@@ -79,6 +86,17 @@ def get_comparison_colors(n, cmap_name=None):
         # Fallback to a safe default list
         defaults = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
         return [defaults[i % len(defaults)] for i in range(n)]
+
+_METHOD_COLOR_MAP = {}
+
+def get_method_color(method_name):
+    """Returns the consistent color for a specific method."""
+    global _METHOD_COLOR_MAP
+    if not _METHOD_COLOR_MAP:
+        colors = get_comparison_colors(len(METHOD_ORDER))
+        _METHOD_COLOR_MAP = dict(zip(METHOD_ORDER, colors))
+    
+    return _METHOD_COLOR_MAP.get(method_name, '#333333')
 
 def setup_style():
     """Configures the plotting style."""
@@ -215,6 +233,14 @@ def extract_results(mat_data):
         item['grad_mag'] = res.grad_mag
         item['t_end_val'] = float(res.t_end_val)
         item['t_vec'] = res.t_vec
+        if hasattr(res, 'tau_roi_steady'):
+            item['tau_roi_steady'] = res.tau_roi_steady
+        if hasattr(res, 'tau_roi_steady_xy'):
+            item['tau_roi_steady_xy'] = res.tau_roi_steady_xy
+        if hasattr(res, 'tau_roi_steady_xz'):
+            item['tau_roi_steady_xz'] = res.tau_roi_steady_xz
+        if hasattr(res, 'tau_roi_steady_yz'):
+            item['tau_roi_steady_yz'] = res.tau_roi_steady_yz
         results_list.append(item)
         
     return results_list
@@ -406,34 +432,163 @@ def plot_xt_diagram_signed(data, t, x, title, output_path, vmax=None, zoom_dur=Z
     plt.savefig(output_path)
     plt.close()
 
+
+def get_ordered_results(results_list, method_order=METHOD_ORDER):
+    """Returns results sorted by the preferred psychophysical order."""
+    order_map = {name: idx for idx, name in enumerate(method_order)}
+    return sorted(results_list, key=lambda item: order_map.get(item['name'], len(order_map)))
+
+
+def compute_single_sided_spectrum(waveform, dt):
+    """Computes single-sided amplitude spectrum from a waveform."""
+    waveform = np.asarray(waveform, dtype=float)
+    waveform = waveform - np.mean(waveform)
+    L = len(waveform)
+    win = get_window('hann', L)
+    waveform_win = waveform * win
+    n_fft = 2 ** int(np.ceil(np.log2(L * 8)))
+    Y = np.fft.fft(waveform_win, n_fft)
+    P2 = np.abs(Y / L)
+    P1 = P2[:n_fft // 2 + 1]
+    P1[1:-1] = 2 * P1[1:-1]
+    fs = 1.0 / dt
+    f = fs * np.arange(n_fft // 2 + 1) / n_fft
+    return f, P1
+
+
+def integrate_band_power(freqs, spectrum, center_freq, half_width=FREQUENCY_BAND_HALF_WIDTH):
+    """Integrates spectral power around a target frequency band."""
+    mask = (freqs >= center_freq - half_width) & (freqs <= center_freq + half_width)
+    if not np.any(mask):
+        return 0.0
+    return float(np.sum(np.square(spectrum[mask])))
+
+def ensure_time_last(arr):
+    arr = np.asarray(arr, dtype=float)
+    if arr.ndim != 3:
+        return arr
+    # 时间维应该是最大的那个维度
+    time_axis = int(np.argmax(arr.shape))
+    if time_axis != 2:
+        arr = np.moveaxis(arr, time_axis, 2)
+    return arr
+
+
+def compute_frequency_fidelity_index(res, dt):
+    """
+    FFI from full steady ROI FFT.
+    Uses exact harmonic bins from the full steady window.
+    """
+    s = ensure_time_last(res['tau_roi_steady'])   # [Nx, Ny, Nt]
+    s = s - np.mean(s, axis=2, keepdims=True)
+
+    nt = s.shape[2]
+    freqs = np.fft.rfftfreq(nt, d=dt)
+    S = np.fft.rfft(s, axis=2)
+    P = np.abs(S) ** 2
+
+    # 空间汇总
+    P_sum = np.sum(P, axis=(0, 1))
+
+    def bin_power(fc):
+        idx = int(np.argmin(np.abs(freqs - fc)))
+        return float(P_sum[idx])
+
+    p200 = bin_power(200)
+    p400 = bin_power(400)
+    p600 = bin_power(600)
+    p800 = bin_power(800)
+
+    total = p200 + p400 + p600 + p800
+    return float(p200 / total) if total > 0 else 0.0
+
+def compute_directional_wavefront_concentration_index(res, dt, f0=200):
+    """
+    DWCI = concentration of the dominant spatial mode at the exact 200 Hz bin.
+    This is a directional wavefront concentration metric, not a generic coherence metric.
+    """
+    component_keys = [
+        'tau_roi_steady_xy',
+        'tau_roi_steady_xz',
+        'tau_roi_steady_yz'
+    ]
+
+    e_total = None
+
+    for key in component_keys:
+        if key not in res:
+            continue
+
+        s = ensure_time_last(res[key])   # [Nx, Ny, Nt]
+        s = s - np.mean(s, axis=2, keepdims=True)
+
+        nt = s.shape[2]
+        freqs = np.fft.rfftfreq(nt, d=dt)
+        idx = int(np.argmin(np.abs(freqs - f0)))
+
+        S = np.fft.rfft(s, axis=2)
+        A = S[:, :, idx]   # exact 200 Hz complex field
+
+        K = np.fft.fftshift(np.fft.fft2(A))
+        E = np.abs(K) ** 2
+
+        if e_total is None:
+            e_total = E
+        else:
+            e_total += E
+
+    if e_total is None:
+        return 0.0
+
+    total_energy = float(np.sum(e_total))
+    if total_energy <= 0:
+        return 0.0
+
+    return float(np.max(e_total) / total_energy)
+
+
+def plot_metric_bar(results_list, metric_values, title, ylabel, output_path):
+    """Plots a bar chart for a scalar metric using the preferred method order."""
+    ordered_results = get_ordered_results(results_list)
+    labels = [item['name'] for item in ordered_results]
+    values = [metric_values.get(label, np.nan) for label in labels]
+    colors = [get_method_color(label) for label in labels]
+
+    plt.figure(figsize=FIG_SIZE_PROFILE)
+    bars = plt.bar(labels, values, color=colors)
+
+    finite_values = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
+    ymax = float(np.nanmax(finite_values)) if finite_values.size > 0 else 0.0
+    text_offset = 0.01 if ymax <= 0 else max(0.001, ymax * 0.02)
+
+    for bar, value in zip(bars, values):
+        if np.isfinite(value):
+            plt.text(bar.get_x() + bar.get_width() / 2, value + text_offset,
+                     f'{value:.4f}', ha='center', va='bottom', fontsize=TICK_SIZE - 2)
+
+    plt.xlabel('Method', fontweight='bold')
+    plt.ylabel(ylabel, fontweight='bold')
+    plt.title(title, fontweight='bold', pad=TITLE_PAD)
+    plt.ylim(0, ymax * 1.15 if ymax > 0 else 1.0)
+    plt.grid(True, axis='y', linestyle='--', alpha=GRID_ALPHA)
+
+    plt.tight_layout(pad=LAYOUT_PAD)
+    plt.savefig(output_path, bbox_inches='tight')
+    plt.close()
+
+
 def plot_spectrum_comparison(results_list, dt, output_path):
     plt.figure(figsize=FIG_SIZE_SPECTRUM)
-    
-    fs = 1.0 / dt
-    
-    colors = get_comparison_colors(len(results_list))
-    for i, item in enumerate(results_list):
-        color = colors[i]
-        waveform = item['center_waveform']
-        # Demean
-        waveform = waveform - np.mean(waveform)
-        # Window
-        L = len(waveform)
-        win = get_window('hann', L)
-        waveform_win = waveform * win
-        # FFT
-        n_fft = 2 ** int(np.ceil(np.log2(L * 8)))
-        Y = np.fft.fft(waveform_win, n_fft)
-        P2 = np.abs(Y / L)
-        P1 = P2[:n_fft // 2 + 1]
-        P1[1:-1] = 2 * P1[1:-1]
-        
+
+    ordered_results = get_ordered_results(results_list)
+    for i, item in enumerate(ordered_results):
+        color = get_method_color(item['name'])
+        freqs, spectrum = compute_single_sided_spectrum(item['center_waveform'], dt)
+
         with np.errstate(divide='ignore'):
-            P1_dB = 20 * np.log10(P1 + 1e-12)
-            
-        f = fs * np.arange(n_fft // 2 + 1) / n_fft
-        
-        plt.plot(f, P1_dB, linewidth=LINE_WIDTH, label=item['name'], color=color)
+            spectrum_db = 20 * np.log10(spectrum + 1e-12)
+
+        plt.plot(freqs, spectrum_db, linewidth=LINE_WIDTH, label=item['name'], color=color)
         
     plt.xlim(0, 1000)
     plt.xlabel('Frequency [Hz]', fontweight='bold')
@@ -449,13 +604,16 @@ def plot_spectrum_comparison(results_list, dt, output_path):
 def plot_spatial_focusing(results_list, x_vec, dx, output_path):
     plt.figure(figsize=FIG_SIZE_PROFILE)
     
-    ny = results_list[0]['tau_peak'].shape[1]
+    ordered_results = get_ordered_results(results_list)
+    if not ordered_results:
+        return
+
+    ny = ordered_results[0]['tau_peak'].shape[1]
     y_idx = ny // 2
     
-    colors = get_comparison_colors(len(results_list))
     FWHM_Y_OFFSET = 0.0
-    for i, item in enumerate(results_list):
-        color = colors[i]
+    for i, item in enumerate(ordered_results):
+        color = get_method_color(item['name'])
         profile = item['tau_peak'][:, y_idx]
         profile_norm = profile / np.max(profile)
         
@@ -489,13 +647,16 @@ def plot_cross_section_comparison(results_list, x_vec, output_path):
     """Plots the cross-section comparison at y=0 for RMS stress."""
     plt.figure(figsize=FIG_SIZE_PROFILE)
     
+    ordered_results = get_ordered_results(results_list)
+    if not ordered_results:
+        return
+
     # Assume all grids are the same size
-    ny = results_list[0]['tau_rms'].shape[1]
+    ny = ordered_results[0]['tau_rms'].shape[1]
     y_idx = ny // 2
     
-    colors = get_comparison_colors(len(results_list))
-    for i, item in enumerate(results_list):
-        color = colors[i]
+    for i, item in enumerate(ordered_results):
+        color = get_method_color(item['name'])
         # Extract the profile at the center y-index
         profile = item['tau_rms'][:, y_idx]
         
@@ -535,6 +696,12 @@ def main():
     dx = grid_cfg.dx
     
     results = extract_results(mat_data)
+
+    for item in results:
+        if 'tau_roi_steady' in item:
+            print(item['name'], 'tau_roi_steady shape =', np.asarray(item['tau_roi_steady']).shape)
+        if 'tau_roi_steady_xy' in item:
+            print(item['name'], 'tau_roi_steady_xy shape =', np.asarray(item['tau_roi_steady_xy']).shape)
     
     # Calculate Global Maxima for consistent colorbars
     global_max_rms = max([np.max(r['tau_rms']) for r in results])
@@ -619,9 +786,28 @@ def main():
                                      unit_label='[m/s]')
 
     print("Generating comparison plots...")
+
+    ordered_results = get_ordered_results(results)
+    fs = 1.0 / dt
+    ffi_values = {item['name']: compute_frequency_fidelity_index(item, dt)
+              for item in ordered_results}
+    dwci_values = {item['name']: compute_directional_wavefront_concentration_index(item, dt)
+                  for item in ordered_results}
+
+    # d. Frequency Fidelity Index
+    plot_metric_bar(ordered_results, ffi_values,
+                    'Frequency Fidelity Index',
+                    'FFI',
+                    os.path.join(OUTPUT_DIR, 'comparison_frequency_fidelity_index.png'))
+
+    # e. Directional Wavefront Concentration Index
+    plot_metric_bar(ordered_results, dwci_values,
+                    'Directional Wavefront Concentration Index',
+                    'DWCI',
+                    os.path.join(OUTPUT_DIR, 'comparison_directional_wavefront_concentration_index.png'))
     
-    # Spectrum
-    plot_spectrum_comparison(results, dt, os.path.join(OUTPUT_DIR, 'comparison_spectrum.png'))
+    # f. Spectrum
+    plot_spectrum_comparison(ordered_results, dt, os.path.join(OUTPUT_DIR, 'comparison_spectrum.png'))
     
     # Spatial Focusing
     plot_spatial_focusing(results, x_vec, dx, os.path.join(OUTPUT_DIR, 'comparison_spatial_focusing.png'))

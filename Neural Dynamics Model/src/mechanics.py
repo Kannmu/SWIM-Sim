@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.signal
 import scipy.ndimage
-from scipy.interpolate import RegularGridInterpolator
+
 try:
     import cupy as cp
     import cupyx.scipy.ndimage as cpx_ndimage
@@ -13,12 +13,13 @@ except Exception:
 
 
 class StressProcessor:
-    def __init__(self, fs, filter_order, f_low, f_high, spatial_sigma, use_gpu=False):
+    def __init__(self, fs, filter_order, f_low, f_high, spatial_sigma, pca_window_ms, use_gpu=False):
         self.fs = fs
         self.filter_order = filter_order
         self.f_low = f_low
         self.f_high = f_high
         self.spatial_sigma = spatial_sigma
+        self.pca_window_ms = pca_window_ms
         self.use_gpu = bool(use_gpu and cp is not None)
 
         self.sos = scipy.signal.butter(
@@ -52,14 +53,9 @@ class StressProcessor:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        N_receptors = receptor_coords.shape[0]
+        n_receptors = receptor_coords.shape[0]
         x_vec_mm = (x_vec * 1000.0).astype(np.float64, copy=False)
         y_vec_mm = (y_vec * 1000.0).astype(np.float64, copy=False)
-
-        t_indices = np.tile(np.arange(T, dtype=np.float64), N_receptors)
-        rx_coords = np.repeat(receptor_coords[:, 0], T).astype(np.float64, copy=False)
-        ry_coords = np.repeat(receptor_coords[:, 1], T).astype(np.float64, copy=False)
-        query_points = np.column_stack((t_indices, rx_coords, ry_coords))
 
         x0_idx = np.searchsorted(x_vec_mm, receptor_coords[:, 0], side='right') - 1
         y0_idx = np.searchsorted(y_vec_mm, receptor_coords[:, 1], side='right') - 1
@@ -78,16 +74,13 @@ class StressProcessor:
         wy = np.clip(wy, 0.0, 1.0)
 
         cached = {
-            "query_points": query_points,
-            "x_vec_mm": x_vec_mm,
-            "y_vec_mm": y_vec_mm,
-            "N_receptors": N_receptors,
             "x0_idx": x0_idx.astype(np.int64, copy=False),
             "x1_idx": x1_idx.astype(np.int64, copy=False),
             "y0_idx": y0_idx.astype(np.int64, copy=False),
             "y1_idx": y1_idx.astype(np.int64, copy=False),
             "wx": wx.astype(np.float64, copy=False),
             "wy": wy.astype(np.float64, copy=False),
+            "n_receptors": n_receptors,
         }
         self._cache[cache_key] = cached
         return cached
@@ -114,15 +107,42 @@ class StressProcessor:
             zi_array[sec, :, :] = zi[sec][None, :] * first_sample[:, None]
         return zi_array
 
-    def _interpolate_cpu(self, smoothed_stress, T, cache):
-        interp = RegularGridInterpolator(
-            (np.arange(T, dtype=np.float64), cache["x_vec_mm"], cache["y_vec_mm"]),
-            smoothed_stress,
-            bounds_error=False,
-            fill_value=0
-        )
-        all_signals = interp(cache["query_points"])
-        return all_signals.reshape(cache["N_receptors"], T)
+    @staticmethod
+    def _signed_axis_projection_cpu(tangent_signals, steady_start_idx):
+        n_receptors, _, _ = tangent_signals.shape
+        projected = np.zeros((n_receptors, tangent_signals.shape[2]), dtype=np.float64)
+        principal_axes = np.zeros((n_receptors, 2), dtype=np.float64)
+
+        for i in range(n_receptors):
+            steady = tangent_signals[i, :, steady_start_idx:]
+            if steady.shape[1] == 0:
+                steady = tangent_signals[i]
+            steady_centered = steady - np.mean(steady, axis=1, keepdims=True)
+            cov = steady_centered @ steady_centered.T
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            axis = eigvecs[:, int(np.argmax(eigvals))]
+            axis = axis / (np.linalg.norm(axis) + 1e-12)
+            if axis[0] < 0:
+                axis = -axis
+            principal_axes[i] = axis
+            projected[i] = axis[0] * tangent_signals[i, 0, :] + axis[1] * tangent_signals[i, 1, :]
+
+        return projected, principal_axes
+
+    @staticmethod
+    def _signed_axis_projection_gpu(tangent_signals, steady_start_idx):
+        steady = tangent_signals[:, :, steady_start_idx:]
+        if steady.shape[2] == 0:
+            steady = tangent_signals
+        steady_centered = steady - cp.mean(steady, axis=2, keepdims=True)
+        cov = cp.matmul(steady_centered, cp.transpose(steady_centered, (0, 2, 1)))
+        eigvals, eigvecs = cp.linalg.eigh(cov)
+        axis = eigvecs[:, :, -1]
+        axis = axis / (cp.linalg.norm(axis, axis=1, keepdims=True) + 1e-12)
+        sign_flip = cp.where(axis[:, 0:1] < 0, -1.0, 1.0)
+        axis = axis * sign_flip
+        projected = cp.sum(axis[:, :, None] * tangent_signals, axis=1)
+        return projected, axis
 
     def _interpolate_gpu(self, smoothed_stress, cache):
         x0 = cp.asarray(cache["x0_idx"])
@@ -145,71 +165,113 @@ class StressProcessor:
         raw_tn = v00 * w00 + v01 * w01 + v10 * w10 + v11 * w11
         return cp.transpose(raw_tn, (1, 0))
 
-    def process(self, stress_tensor, x_vec, y_vec, receptor_coords, original_dt):
-        print(f"DEBUG: StressProcessor.process input shape: {stress_tensor.shape}, dt: {original_dt}")
-        T, _, _ = stress_tensor.shape
+    def _interpolate_cpu(self, smoothed_stress, cache):
+        x0 = cache["x0_idx"]
+        x1 = cache["x1_idx"]
+        y0 = cache["y0_idx"]
+        y1 = cache["y1_idx"]
+        wx = cache["wx"]
+        wy = cache["wy"]
 
+        v00 = smoothed_stress[:, x0, y0]
+        v01 = smoothed_stress[:, x0, y1]
+        v10 = smoothed_stress[:, x1, y0]
+        v11 = smoothed_stress[:, x1, y1]
+
+        w00 = (1.0 - wx) * (1.0 - wy)
+        w01 = (1.0 - wx) * wy
+        w10 = wx * (1.0 - wy)
+        w11 = wx * wy
+
+        raw_tn = v00 * w00 + v01 * w01 + v10 * w10 + v11 * w11
+        return np.transpose(raw_tn, (1, 0))
+
+    def _resample_signals(self, signals, input_fs, target_len=None):
+        current_len = signals.shape[-1]
+        if target_len is None:
+            if abs(input_fs - self.fs) <= 1.0:
+                return signals
+            target_len = int(round(current_len * self.fs / input_fs))
+
+        if self.use_gpu:
+            return cpx_signal.resample(signals, target_len, axis=-1)
+        return scipy.signal.resample(signals, target_len, axis=-1)
+
+    def _filter_signed_scalar(self, signed_scalar):
+        if self.use_gpu:
+            detrended = signed_scalar - cp.mean(signed_scalar, axis=1, keepdims=True)
+            zi = cpx_signal.sosfilt_zi(self.sos_gpu)
+            zi_array = self._build_sos_zi_array_gpu(zi, detrended[:, 0])
+            filtered, _ = cpx_signal.sosfilt(self.sos_gpu, detrended, axis=1, zi=zi_array)
+            return filtered
+
+        detrended = signed_scalar - np.mean(signed_scalar, axis=1, keepdims=True)
+        zi = scipy.signal.sosfilt_zi(self.sos)
+        zi_array = self._build_sos_zi_array(zi, detrended[:, 0])
+        filtered, _ = scipy.signal.sosfilt(self.sos, detrended, axis=1, zi=zi_array)
+        return filtered
+
+    def process(self, stress_xz, stress_yz, x_vec, y_vec, receptor_coords, original_dt):
+        if stress_xz is None or stress_yz is None:
+            raise ValueError("Signed tangential stress inputs stress_xz and stress_yz are required.")
+
+        print(f"DEBUG: StressProcessor.process input shapes: xz={stress_xz.shape}, yz={stress_yz.shape}, dt={original_dt}")
+        if stress_xz.shape != stress_yz.shape:
+            raise ValueError(f"stress_xz and stress_yz shape mismatch: {stress_xz.shape} vs {stress_yz.shape}")
+
+        t_samples, _, _ = stress_xz.shape
         dx_mm = (x_vec[1] - x_vec[0]) * 1000.0
         dy_mm = (y_vec[1] - y_vec[0]) * 1000.0
-        
-        # Calculate kernel sigma in terms of grid pixels
         sigma_pixels_x = self.spatial_sigma / dx_mm
         sigma_pixels_y = self.spatial_sigma / dy_mm
-
-        cache = self._get_interpolation_cache(T, x_vec, y_vec, receptor_coords)
+        cache = self._get_interpolation_cache(t_samples, x_vec, y_vec, receptor_coords)
         input_fs = 1.0 / original_dt
 
         if self.use_gpu:
-            stress_gpu = cp.asarray(stress_tensor, dtype=cp.float64)
-            smoothed_stress = cpx_ndimage.gaussian_filter(
-                stress_gpu,
-                sigma=[0, sigma_pixels_x, sigma_pixels_y],
-                mode='nearest'
-            )
-            raw_signals = self._interpolate_gpu(smoothed_stress, cache)
+            xz_gpu = cp.asarray(stress_xz, dtype=cp.float64)
+            yz_gpu = cp.asarray(stress_yz, dtype=cp.float64)
 
-            if abs(input_fs - self.fs) > 1.0:
-                num_samples_new = int(T * self.fs / input_fs)
-                print(f"DEBUG: Resampling from {input_fs:.1f}Hz to {self.fs:.1f}Hz. Samples: {T} -> {num_samples_new}")
-                final_signals = cpx_signal.resample(raw_signals, num_samples_new, axis=1)
-                t_vec_new = cp.arange(num_samples_new, dtype=cp.float64) / self.fs
-            else:
-                final_signals = raw_signals
-                t_vec_new = cp.arange(T, dtype=cp.float64) / self.fs
+            xz_smooth = cpx_ndimage.gaussian_filter(xz_gpu, sigma=[0, sigma_pixels_x, sigma_pixels_y], mode='nearest')
+            yz_smooth = cpx_ndimage.gaussian_filter(yz_gpu, sigma=[0, sigma_pixels_x, sigma_pixels_y], mode='nearest')
 
-            detrended_signals = final_signals - cp.mean(final_signals, axis=1, keepdims=True)
-            zi = cpx_signal.sosfilt_zi(self.sos_gpu)
-            zi_array = self._build_sos_zi_array_gpu(zi, detrended_signals[:, 0])
-            filtered_signals, _ = cpx_signal.sosfilt(self.sos_gpu, detrended_signals, axis=1, zi=zi_array)
-            
-            # DEBUG: Check for NaNs or Infs
-            if cp.any(cp.isnan(filtered_signals)) or cp.any(cp.isinf(filtered_signals)):
+            xz_raw = self._interpolate_gpu(xz_smooth, cache)
+            yz_raw = self._interpolate_gpu(yz_smooth, cache)
+
+            target_len = None if abs(input_fs - self.fs) <= 1.0 else int(round(t_samples * self.fs / input_fs))
+            xz_final = self._resample_signals(xz_raw, input_fs, target_len=target_len)
+            yz_final = self._resample_signals(yz_raw, input_fs, target_len=target_len)
+            n_time = xz_final.shape[1]
+            t_vec_new = cp.arange(n_time, dtype=cp.float64) / self.fs
+            steady_window_samples = max(1, int(round(self.pca_window_ms * 1e-3 * self.fs)))
+            steady_start_idx = max(0, n_time - steady_window_samples)
+            tangent = cp.stack((xz_final, yz_final), axis=1)
+            signed_scalar, principal_axes = self._signed_axis_projection_gpu(tangent, steady_start_idx)
+            filtered = self._filter_signed_scalar(signed_scalar)
+            if cp.any(cp.isnan(filtered)) or cp.any(cp.isinf(filtered)):
                 print("WARNING: NaNs or Infs detected in filtered_signals (GPU)!")
-                
-            return filtered_signals, t_vec_new, final_signals
+            raw_components = {'xz': xz_final, 'yz': yz_final, 'signed': signed_scalar, 'principal_axes': principal_axes}
+            return filtered, t_vec_new, raw_components
 
-        smoothed_stress = scipy.ndimage.gaussian_filter(
-            stress_tensor,
-            sigma=[0, sigma_pixels_x, sigma_pixels_y],
-            mode='nearest'
-        )
-        raw_signals = self._interpolate_cpu(smoothed_stress, T, cache)
+        xz_smooth = scipy.ndimage.gaussian_filter(stress_xz, sigma=[0, sigma_pixels_x, sigma_pixels_y], mode='nearest')
+        yz_smooth = scipy.ndimage.gaussian_filter(stress_yz, sigma=[0, sigma_pixels_x, sigma_pixels_y], mode='nearest')
 
-        if abs(input_fs - self.fs) > 1.0:
-            num_samples_new = int(T * self.fs / input_fs)
-            print(f"DEBUG: Resampling from {input_fs:.1f}Hz to {self.fs:.1f}Hz. Samples: {T} -> {num_samples_new}")
-            final_signals = scipy.signal.resample(raw_signals, num_samples_new, axis=1)
-            t_vec_new = np.arange(num_samples_new, dtype=np.float64) / self.fs
-        else:
-            final_signals = raw_signals
-            t_vec_new = np.arange(T, dtype=np.float64) / self.fs
+        xz_raw = self._interpolate_cpu(xz_smooth, cache)
+        yz_raw = self._interpolate_cpu(yz_smooth, cache)
 
-        detrended_signals = final_signals - np.mean(final_signals, axis=1, keepdims=True)
-        zi = scipy.signal.sosfilt_zi(self.sos)
-        zi_array = self._build_sos_zi_array(zi, detrended_signals[:, 0])
-        filtered_signals, _ = scipy.signal.sosfilt(self.sos, detrended_signals, axis=1, zi=zi_array)
-        
-        if np.any(np.isnan(filtered_signals)) or np.any(np.isinf(filtered_signals)):
-             print("WARNING: NaNs or Infs detected in filtered_signals (CPU)!")
-             
-        return filtered_signals, t_vec_new, final_signals
+        target_len = None if abs(input_fs - self.fs) <= 1.0 else int(round(t_samples * self.fs / input_fs))
+        xz_final = self._resample_signals(xz_raw, input_fs, target_len=target_len)
+        yz_final = self._resample_signals(yz_raw, input_fs, target_len=target_len)
+
+        n_time = xz_final.shape[1]
+        t_vec_new = np.arange(n_time, dtype=np.float64) / self.fs
+        steady_window_samples = max(1, int(round(self.pca_window_ms * 1e-3 * self.fs)))
+        steady_start_idx = max(0, n_time - steady_window_samples)
+        tangent = np.stack((xz_final, yz_final), axis=1)
+        signed_scalar, principal_axes = self._signed_axis_projection_cpu(tangent, steady_start_idx)
+        filtered = self._filter_signed_scalar(signed_scalar)
+
+        if np.any(np.isnan(filtered)) or np.any(np.isinf(filtered)):
+            print("WARNING: NaNs or Infs detected in filtered_signals (CPU)!")
+
+        raw_components = {'xz': xz_final, 'yz': yz_final, 'signed': signed_scalar, 'principal_axes': principal_axes}
+        return filtered, t_vec_new, raw_components

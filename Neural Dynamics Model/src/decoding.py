@@ -1,11 +1,9 @@
 import numpy as np
-import scipy.signal
+
 try:
     import cupy as cp
-    import cupyx.scipy.signal as cpx_signal
 except Exception:
     cp = None
-    cpx_signal = None
 
 
 class PopulationDecoder:
@@ -48,81 +46,48 @@ class PopulationDecoder:
             self._gaussian_kernel = np.exp(-dist_sq / two_sigma_sq)
         self._cached_receptor_key = key
 
-    def compute_intensity_score(self, spike_trains):
-        """
-        Total spike count in the window.
-        Args:
-            spike_trains: [N, T_window] boolean array (sliced to window)
-        """
-        return np.sum(spike_trains)
+    @staticmethod
+    def _to_float(value):
+        if cp is not None and isinstance(value, cp.ndarray):
+            return float(value.item())
+        return float(value)
 
-    def compute_spatial_clarity(self, spike_trains, receptor_coords, roi_size):
-        """
-        Spatial Clarity Score = -log(A_0.5 / A_ROI)
-        """
-        # 1. Count spikes per receptor in window
-        spike_counts = np.sum(spike_trains, axis=1)
-        return self.compute_spatial_clarity_from_counts(spike_counts, receptor_coords)
-
-    def compute_spatial_clarity_from_counts(self, spike_counts, receptor_coords):
+    def compute_phase_locked_weight(self, spike_train, t_vec, f0=200.0):
         if self.use_gpu:
-            spike_counts = cp.asarray(spike_counts, dtype=cp.float64)
+            spikes = cp.asarray(spike_train, dtype=cp.float64)
+            t = cp.asarray(t_vec, dtype=cp.float64)
+            phases = cp.exp(-1j * 2.0 * cp.pi * f0 * t)
+            return cp.abs(cp.sum(spikes * phases, axis=1))
+
+        spikes = np.asarray(spike_train, dtype=np.float64)
+        t = np.asarray(t_vec, dtype=np.float64)
+        phases = np.exp(-1j * 2.0 * np.pi * f0 * t)
+        return np.abs(np.sum(spikes * phases, axis=1))
+
+    def build_phase_locked_density_map(self, phase_weights, receptor_coords):
+        if self.use_gpu:
+            phase_weights = cp.asarray(phase_weights, dtype=cp.float64)
         else:
-            spike_counts = np.asarray(spike_counts, dtype=np.float64)
+            phase_weights = np.asarray(phase_weights, dtype=np.float64)
+
         self._ensure_kernel(receptor_coords)
-        density_flat = self._gaussian_kernel @ spike_counts
+        density_flat = self._gaussian_kernel @ phase_weights
         n = self._grid_vec.size
-        density_map = density_flat.reshape(n, n)
+        return density_flat.reshape(n, n)
 
+    def compute_core_map_metrics(self, phase_weights, receptor_coords):
+        density_map = self.build_phase_locked_density_map(phase_weights, receptor_coords)
         rho_max = cp.max(density_map) if self.use_gpu else np.max(density_map)
-        
-        # DEBUG: Log density map stats
-        total_counts = cp.sum(spike_counts) if self.use_gpu else np.sum(spike_counts)
-        print(f"DEBUG: Clarity: total_counts={total_counts}, rho_max={rho_max:.4f}")
+        rho_max_scalar = self._to_float(rho_max)
 
-        if rho_max == 0:
-            return 0.0
+        if rho_max_scalar <= 0.0:
+            return 0.0, 0.0, density_map
 
         mask = density_map >= (0.5 * rho_max)
         area_pixels = cp.sum(mask) if self.use_gpu else np.sum(mask)
-        pixel_area = self.density_grid ** 2
-        area_mm2 = area_pixels * pixel_area
+        area_mm2 = self._to_float(area_pixels) * (self.density_grid ** 2)
+        if area_mm2 <= 0.0:
+            return rho_max_scalar, 0.0, density_map
 
-        if area_mm2 == 0:
-            return 0.0
-            
-        print(f"DEBUG: Clarity: area_mm2={area_mm2:.4f}, roi_area={self.roi_area:.4f}")
-
-        if self.use_gpu:
-            score = -cp.log(area_mm2 / self.roi_area)
-            return float(score.item())
-        score = -np.log(area_mm2 / self.roi_area)
-        return float(score)
-
-    def compute_ffi(self, raw_signals, fs, f_signal_band, f_noise_band, epsilon=1e-9):
-        """
-        Frequency Fidelity Index.
-        Based on PSD of raw inputs.
-        """
-        if self.use_gpu:
-            raw_signals = cp.asarray(raw_signals, dtype=cp.float64)
-            f, Pxx = cpx_signal.welch(raw_signals, fs, window='hann', nperseg=int(fs * 0.05), axis=1)
-        else:
-            raw_signals = np.asarray(raw_signals, dtype=np.float64)
-            f, Pxx = scipy.signal.welch(raw_signals, fs, window='hann', nperseg=int(fs * 0.05), axis=1)
-
-        idx_sig = (f >= f_signal_band[0]) & (f <= f_signal_band[1])
-        power_sig = cp.sum(Pxx[:, idx_sig], axis=1) if self.use_gpu else np.sum(Pxx[:, idx_sig], axis=1)
-
-        idx_noise = (f >= f_noise_band[0]) & (f <= f_noise_band[1])
-        power_noise = cp.sum(Pxx[:, idx_noise], axis=1) if self.use_gpu else np.sum(Pxx[:, idx_noise], axis=1)
-
-        numerator = cp.sum(power_sig) if self.use_gpu else np.sum(power_sig)
-        denominator = (cp.sum(power_noise) if self.use_gpu else np.sum(power_noise)) + epsilon
-
-        if denominator == 0:
-            return 0.0
-
-        if self.use_gpu:
-            return float((numerator / denominator).item())
-        return float(numerator / denominator)
+        clarity = -np.log(area_mm2 / self.roi_area)
+        return rho_max_scalar, float(clarity), density_map
