@@ -11,6 +11,8 @@ ROI_SIZE_MM = 40.0
 N_RECEPTORS = 320
 MIN_DISTANCE_MM = 1.8
 RANDOM_SEED = 2025
+SEED_RUN_COUNT = 20
+SEED_STRIDE = 1
 
 # Spatial Pooling Parameters
 SPATIAL_SIGMA_MM = 2.0  # Gaussian kernel sigma for spatial smoothing before receptor interpolation

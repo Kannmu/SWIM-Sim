@@ -68,36 +68,45 @@ def _complex_abs_max(x):
     return _to_float(np.max(np.abs(x)))
 
 
-def main():
-    print("=== Computational Neural Dynamics Model ===")
-    print(f"DEBUG: Config: FS={config.FS_MODEL}, DT={config.DT_MS}, GPU={config.USE_GPU}")
-    use_gpu = bool(getattr(config, "USE_GPU", False))
-    gpu_ready = bool(use_gpu and cp is not None and cuda.is_available())
-    if gpu_ready:
-        cuda.select_device(getattr(config, "GPU_DEVICE_ID", 0))
-        print("Backend: GPU (CUDA)")
-    else:
-        if use_gpu:
-            print("Backend: CPU (GPU requested but unavailable)")
-        else:
-            print("Backend: CPU")
+def _rank_methods_desc(results_by_method, metric_key, method_order):
+    ranked_values = []
+    for method_name in method_order:
+        if method_name in results_by_method:
+            ranked_values.append((method_name, float(results_by_method[method_name][metric_key])))
+    ranked_values.sort(key=lambda item: (-item[1], item[0]))
+    ranks = {}
+    for idx, (method_name, _) in enumerate(ranked_values, start=1):
+        ranks[method_name] = idx
+    return ranks
 
-    print(f"Loading data from {config.DATA_FILE}...")
-    if not os.path.exists(config.DATA_FILE):
-        print("Error: Data file not found. Please run the K-Wave simulation first.")
-        return
 
-    loader = DataLoader(config.DATA_FILE)
-    data = loader.load()
-    methods_data = data['methods']
-    input_dt = data.get('dt', 0.1 / 1000)
+def _print_results_table(title, results_summary, method_order):
+    print(f"\n=== {title} ===")
+    print(f"{'Method':<10} | {'Intensity':<10} | {'Clarity':<10}")
+    print("-" * 40)
+    for name in method_order:
+        if name in results_summary:
+            res = results_summary[name]
+            print(f"{name:<10} | {res['Intensity']:<10.3f} | {res['SpatialClarity']:<10.3f}")
 
+
+def _print_rank_table(title, rank_map, method_order, value_label):
+    print(f"\n=== {title} ===")
+    print(f"{'Method':<10} | {value_label}")
+    print("-" * 32)
+    for name in method_order:
+        if name in rank_map:
+            print(f"{name:<10} | {rank_map[name]:.3f}")
+
+
+def _run_single_seed(seed, methods_data, input_dt, gpu_ready):
+    print(f"\n{'=' * 24} Seed {seed} {'=' * 24}")
     print("Initializing model components...")
     receptor_array = ReceptorArray(
         roi_size_mm=config.ROI_SIZE_MM,
         n_receptors=config.N_RECEPTORS,
         min_dist_mm=config.MIN_DISTANCE_MM,
-        seed=config.RANDOM_SEED
+        seed=seed
     )
     receptor_coords = receptor_array.generate()
     print(f"Generated {len(receptor_coords)} receptors.")
@@ -133,8 +142,7 @@ def main():
 
     print(f"Calibrating Global Gain using method: {config.CALIBRATION_METHOD}...")
     if config.CALIBRATION_METHOD not in methods_data:
-        print(f"Error: Calibration method {config.CALIBRATION_METHOD} not found in data.")
-        return
+        raise ValueError(f"Calibration method {config.CALIBRATION_METHOD} not found in data.")
 
     calib_data = methods_data[config.CALIBRATION_METHOD]
     calib_processed = stress_processor.process(
@@ -182,11 +190,11 @@ def main():
     results_summary = {}
 
     print("\nRunning Simulation for all methods...")
-    for method_name in tqdm(config.STIMULUS_METHODS, desc="Methods"):
+    for method_name in tqdm(config.STIMULUS_METHODS, desc=f"Methods@seed={seed}"):
         if method_name not in methods_data:
             print(f"Skipping {method_name} (not in data)")
             continue
-        
+
         t0 = time.time()
         print(f"\n>>> Processing Method: {method_name}")
 
@@ -247,53 +255,120 @@ def main():
             qx_complex,
             qy_complex,
             receptor_coords,
-            spikes_x=spikes_x_win,
-            spikes_y=spikes_y_win,
-            dt_ms=config.DT_MS,
             fidelity_weights=fidelity_weights,
         )
         intensity = metrics['intensity']
         clarity = metrics['clarity']
-        rho_max = metrics['rho_max']
-        energy_map = metrics['energy_map']
-        ndwci = metrics['ndwci']
-        isharp = metrics['iSharp']
-        mean_ffi = metrics['mean_ffi']
 
         total_spikes_x = _to_int(cp.sum(spikes_x_win) if _is_gpu_array(spikes_x_win) else np.sum(spikes_x_win))
         total_spikes_y = _to_int(cp.sum(spikes_y_win) if _is_gpu_array(spikes_y_win) else np.sum(spikes_y_win))
         qx_max = _complex_abs_max(qx_complex)
         qy_max = _complex_abs_max(qy_complex)
-        fidelity_max = _to_float(cp.max(fidelity_weights) if _is_gpu_array(fidelity_weights) else np.max(fidelity_weights))
-        energy_peak = _to_float(cp.max(energy_map) if _is_gpu_array(energy_map) else np.max(energy_map))
         print(
             f"DEBUG: Spikes in window total_x={total_spikes_x}, total_y={total_spikes_y}, "
-            f"max_|qx|={qx_max:.4f}, max_|qy|={qy_max:.4f}, rho_max={rho_max:.4f}, "
-            f"nDWCI={ndwci:.4f}, iSharp={isharp:.4f}, mean_FFI={mean_ffi:.4f}, fidelity_max={fidelity_max:.4f}, spectral_peak={energy_peak:.4f}"
+            f"max_|qx|={qx_max:.4f}, max_|qy|={qy_max:.4f}, intensity={intensity:.4f}, clarity={clarity:.4f}"
         )
 
         results_summary[method_name] = {
-            'Intensity': intensity,
-            'SpatialClarity': clarity,
-            'nDWCI': ndwci,
-            'iSharp': isharp,
-            'MeanFFI': mean_ffi,
-            'RhoMax': rho_max,
+            'Intensity': float(intensity),
+            'SpatialClarity': float(clarity),
         }
-        
+
         t1 = time.time()
         print(f"DEBUG: Method {method_name} finished in {t1 - t0:.2f}s")
 
-    print("\n=== Final Results ===")
-    print(f"{'Method':<10} | {'Intensity':<10} | {'Clarity':<10} | {'iSharp':<10} | {'MeanFFI':<10} | {'nDWCI':<10} | {'RhoMax':<10}")
-    print("-" * 110)
-    for name in config.STIMULUS_METHODS:
-        if name in results_summary:
-            res = results_summary[name]
+    _print_results_table(f"Seed {seed} Results", results_summary, config.STIMULUS_METHODS)
+    intensity_ranks = _rank_methods_desc(results_summary, 'Intensity', config.STIMULUS_METHODS)
+    clarity_ranks = _rank_methods_desc(results_summary, 'SpatialClarity', config.STIMULUS_METHODS)
+    _print_rank_table(f"Seed {seed} Intensity Ranks", intensity_ranks, config.STIMULUS_METHODS, 'Rank')
+    _print_rank_table(f"Seed {seed} Clarity Ranks", clarity_ranks, config.STIMULUS_METHODS, 'Rank')
+
+    return {
+        'seed': seed,
+        'gamma': float(gamma),
+        'results_summary': results_summary,
+        'intensity_ranks': intensity_ranks,
+        'clarity_ranks': clarity_ranks,
+    }
+
+
+def main():
+    print("=== Computational Neural Dynamics Model ===")
+    print(f"DEBUG: Config: FS={config.FS_MODEL}, DT={config.DT_MS}, GPU={config.USE_GPU}")
+    use_gpu = bool(getattr(config, "USE_GPU", False))
+    gpu_ready = bool(use_gpu and cp is not None and cuda.is_available())
+    if gpu_ready:
+        cuda.select_device(getattr(config, "GPU_DEVICE_ID", 0))
+        print("Backend: GPU (CUDA)")
+    else:
+        if use_gpu:
+            print("Backend: CPU (GPU requested but unavailable)")
+        else:
+            print("Backend: CPU")
+
+    print(f"Loading data from {config.DATA_FILE}...")
+    if not os.path.exists(config.DATA_FILE):
+        print("Error: Data file not found. Please run the K-Wave simulation first.")
+        return
+
+    loader = DataLoader(config.DATA_FILE)
+    data = loader.load()
+    methods_data = data['methods']
+    input_dt = data.get('dt', 0.1 / 1000)
+
+    seed_run_count = int(getattr(config, 'SEED_RUN_COUNT', 1))
+    seed_stride = int(getattr(config, 'SEED_STRIDE', 1))
+    if seed_run_count <= 0:
+        raise ValueError("SEED_RUN_COUNT must be >= 1")
+    if seed_stride <= 0:
+        raise ValueError("SEED_STRIDE must be >= 1")
+
+    seeds = [int(config.RANDOM_SEED) + i * seed_stride for i in range(seed_run_count)]
+    print(f"Running seed robustness evaluation across {len(seeds)} seeds: {seeds}")
+
+    all_runs = []
+    for run_idx, seed in enumerate(seeds, start=1):
+        print(f"\n##### Seed Run {run_idx}/{len(seeds)} #####")
+        run_result = _run_single_seed(seed, methods_data, input_dt, gpu_ready)
+        all_runs.append(run_result)
+
+    aggregated_results = {}
+    for method_name in config.STIMULUS_METHODS:
+        method_runs = [run['results_summary'][method_name] for run in all_runs if method_name in run['results_summary']]
+        if not method_runs:
+            continue
+        aggregated_results[method_name] = {
+            'Intensity': float(np.median([item['Intensity'] for item in method_runs])),
+            'SpatialClarity': float(np.median([item['SpatialClarity'] for item in method_runs])),
+        }
+
+    median_intensity_ranks = {}
+    median_clarity_ranks = {}
+    for method_name in config.STIMULUS_METHODS:
+        intensity_rank_values = [run['intensity_ranks'][method_name] for run in all_runs if method_name in run['intensity_ranks']]
+        clarity_rank_values = [run['clarity_ranks'][method_name] for run in all_runs if method_name in run['clarity_ranks']]
+        if intensity_rank_values:
+            median_intensity_ranks[method_name] = float(np.median(intensity_rank_values))
+        if clarity_rank_values:
+            median_clarity_ranks[method_name] = float(np.median(clarity_rank_values))
+
+    print("\n=== Seed-by-Seed Summary ===")
+    for run in all_runs:
+        print(f"Seed {run['seed']}: calibrated gamma={run['gamma']:.4f}")
+        for method_name in config.STIMULUS_METHODS:
+            if method_name not in run['results_summary']:
+                continue
+            res = run['results_summary'][method_name]
+            intensity_rank = run['intensity_ranks'].get(method_name)
+            clarity_rank = run['clarity_ranks'].get(method_name)
             print(
-                f"{name:<10} | {res['Intensity']:<10.3f} | {res['SpatialClarity']:<10.3f} | "
-                f"{res['iSharp']:<10.3f} | {res['MeanFFI']:<10.3f} | {res['nDWCI']:<10.3f} | {res['RhoMax']:<10.3f}"
+                f"  {method_name:<10} | Intensity={res['Intensity']:.3f} | Clarity={res['SpatialClarity']:.3f} | "
+                f"IntensityRank={intensity_rank} | ClarityRank={clarity_rank}"
             )
+
+    _print_results_table("Median Metrics Across Seeds", aggregated_results, config.STIMULUS_METHODS)
+    _print_rank_table("Median Intensity Rank Across Seeds", median_intensity_ranks, config.STIMULUS_METHODS, 'MedianRank')
+    _print_rank_table("Median Clarity Rank Across Seeds", median_clarity_ranks, config.STIMULUS_METHODS, 'MedianRank')
 
     print("\nDone.")
 

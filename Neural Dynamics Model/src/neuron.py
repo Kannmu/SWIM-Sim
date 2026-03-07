@@ -89,8 +89,8 @@ class LIFModel:
     @staticmethod
     def compute_current(filtered_stress, gain):
         if cp is not None and isinstance(filtered_stress, cp.ndarray):
-            return cp.where(filtered_stress > 0.0, filtered_stress, 0.0) * gain
-        return np.where(filtered_stress > 0.0, filtered_stress, 0.0) * gain
+            return filtered_stress * gain
+        return filtered_stress * gain
 
     def compute_currents(self, filtered_xz, filtered_yz, gain):
         current_x = self.compute_current(filtered_xz, gain)
