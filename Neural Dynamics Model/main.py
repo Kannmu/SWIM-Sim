@@ -19,6 +19,7 @@ except Exception:
     cp = None
 
 
+
 def _is_gpu_array(x):
     return cp is not None and isinstance(x, cp.ndarray)
 
@@ -51,6 +52,13 @@ def _bin_sample_count():
         raise ValueError("TRIAL_BIN_MS / DT_MS must be >= 1 sample")
     return samples
 
+def _distribution_choice_probability(values_a, values_b):
+    a = np.asarray(_to_numpy(values_a), dtype=np.float64).ravel()
+    b = np.asarray(_to_numpy(values_b), dtype=np.float64).ravel()
+    return float(
+        np.mean(a[:, None] > b[None, :]) +
+        0.5 * np.mean(a[:, None] == b[None, :])
+    )
 
 def _mean_choice_probability(values_a, values_b):
     xp = cp if _is_gpu_array(values_a) or _is_gpu_array(values_b) else np
@@ -115,10 +123,16 @@ def _stack_residual_matrices(matrices):
         residuals.append(Xn - mu)
     return np.vstack(residuals)
 
+def _safe_logit(p, eps=1e-4):
+    p = float(np.clip(p, eps, 1.0 - eps))
+    return np.log(p / (1.0 - p))
 
 def _calibration_target_probability(freq_hz, amp_scale):
     amp_center = 0.55 if int(round(freq_hz)) == 200 else 0.75
-    return float(1.0 / (1.0 + np.exp(-config.CALIBRATION_SIGMOID_SLOPE * (amp_scale - amp_center))))
+    p_detect = 1.0 / (
+        1.0 + np.exp(-config.CALIBRATION_SIGMOID_SLOPE * (amp_scale - amp_center))
+    )
+    return float(0.5 + 0.5 * p_detect)
 
 
 def _pair_mahalanobis_scores(projected, mu0, sigma0_inv):
@@ -398,8 +412,7 @@ def _calibration_objective(params, calibration_variants, baseline_cache, baselin
     sigma0 = _to_numpy(sigma0)
     sigma0_inv = np.linalg.pinv(sigma0)
 
-    baseline_scores = _pair_mahalanobis_scores(baseline_projected, mu0, sigma0_inv)
-    baseline_median = float(np.median(_to_numpy(baseline_scores)))
+    baseline_scores = _to_numpy(_pair_mahalanobis_scores(baseline_projected, mu0, sigma0_inv))
 
     monotonic_penalty = 0.0
     frequency_penalty = 0.0
@@ -408,13 +421,11 @@ def _calibration_objective(params, calibration_variants, baseline_cache, baselin
 
     for item in calibration_variants:
         projected = _to_numpy(decoder.transform_pca(stim_matrices[item['label']]))
-        scores = _pair_mahalanobis_scores(projected, mu0, sigma0_inv)
-        scores = _to_numpy(scores)
-
-        detect_prob = float(np.mean(scores > baseline_median))
+        scores = _to_numpy(_pair_mahalanobis_scores(projected, mu0, sigma0_inv))
+        detect_prob = _distribution_choice_probability(scores, baseline_scores)
         target = _calibration_target_probability(item['freq_hz'], item['amp_scale'])
 
-        fit_penalty += (detect_prob - target) ** 2
+        fit_penalty += (_safe_logit(detect_prob) - _safe_logit(target)) ** 2
         by_freq.setdefault(item['freq_hz'], []).append((item['amp_scale'], detect_prob))
 
     for freq, seq in by_freq.items():
