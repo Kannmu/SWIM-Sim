@@ -21,7 +21,7 @@ class LIFModel:
         self.ref_steps = int(t_ref / dt)
         print(f"DEBUG: LIFModel initialized. dt={dt}, t_ref={t_ref}, ref_steps={self.ref_steps}")
 
-    def run(self, input_current):
+    def run_single(self, input_current):
         if self.use_gpu:
             return run_lif_cuda(
                 input_current,
@@ -44,7 +44,12 @@ class LIFModel:
             self.ref_steps
         )
 
-    def run_counts(self, input_current):
+    def run(self, currents_x, currents_y):
+        spikes_x = self.run_single(currents_x)
+        spikes_y = self.run_single(currents_y)
+        return spikes_x, spikes_y
+
+    def run_counts_single(self, input_current):
         if self.use_gpu:
             return run_lif_count_cuda(
                 input_current,
@@ -67,21 +72,25 @@ class LIFModel:
             self.ref_steps
         )
 
+    def run_counts(self, currents_x, currents_y):
+        counts_x = self.run_counts_single(currents_x)
+        counts_y = self.run_counts_single(currents_y)
+        return counts_x, counts_y
+
     @staticmethod
     def compute_current(filtered_stress, gain):
         if cp is not None and isinstance(filtered_stress, cp.ndarray):
             return cp.where(filtered_stress > 0.0, filtered_stress, 0.0) * gain
         return np.where(filtered_stress > 0.0, filtered_stress, 0.0) * gain
 
+    def compute_currents(self, filtered_xz, filtered_yz, gain):
+        current_x = self.compute_current(filtered_xz, gain)
+        current_y = self.compute_current(filtered_yz, gain)
+        return current_x, current_y
+
 
 def _is_cupy_array(x):
     return cp is not None and isinstance(x, cp.ndarray)
-
-
-def _to_host_counts(counts):
-    if _is_cupy_array(counts):
-        return cp.asnumpy(counts)
-    return counts
 
 
 @njit(cache=True, fastmath=False, parallel=True)
@@ -91,7 +100,6 @@ def run_lif_numba_parallel(input_current, v_rest, v_reset, v_thresh, r_m, tau_m,
 
     alpha = dt / tau_m
 
-    # Parallelize across neurons; each neuron's temporal dynamics are independent.
     for i in prange(N):
         v_i = v_rest
         ref_i = 0
@@ -191,23 +199,21 @@ def _run_lif_count_cuda_kernel(input_current, spike_counts, v_rest, v_reset, v_t
 def run_lif_cuda(input_current, v_rest, v_reset, v_thresh, r_m, tau_m, dt, ref_steps):
     alpha = dt / tau_m
     is_cupy_input = _is_cupy_array(input_current)
-    
+
     if is_cupy_input:
         current_gpu = input_current
-        # Initialize with zeros using cupy
         spike_gpu = cp.zeros(current_gpu.shape, dtype=cp.uint8)
     else:
         current_gpu = cuda.to_device(np.asarray(input_current, dtype=np.float64))
-        # Initialize with zeros using numpy -> device to ensure clean memory
         spike_gpu = cuda.to_device(np.zeros(current_gpu.shape, dtype=np.uint8))
 
-    N, T = current_gpu.shape
+    N, _ = current_gpu.shape
     threads_per_block = 256
     blocks = (N + threads_per_block - 1) // threads_per_block
     _run_lif_cuda_kernel[blocks, threads_per_block](
         current_gpu, spike_gpu, v_rest, v_reset, v_thresh, r_m, alpha, ref_steps
     )
-    
+
     if is_cupy_input:
         return spike_gpu.astype(cp.bool_)
     return spike_gpu.copy_to_host().astype(np.bool_)

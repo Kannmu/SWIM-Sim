@@ -7,11 +7,12 @@ except Exception:
 
 
 class PopulationDecoder:
-    def __init__(self, roi_area_mm2, density_sigma_mm, density_grid_mm, use_gpu=False):
+    def __init__(self, roi_area_mm2, density_sigma_mm, density_grid_mm, fidelity_freqs_hz=None, use_gpu=False):
         self.roi_area = roi_area_mm2
         self.density_sigma = density_sigma_mm
         self.density_grid = density_grid_mm
         self.use_gpu = bool(use_gpu and cp is not None)
+        self.fidelity_freqs_hz = tuple(fidelity_freqs_hz or (200.0, 400.0, 600.0, 800.0))
 
         roi_size = np.sqrt(self.roi_area)
         half_roi = roi_size / 2.0
@@ -52,42 +53,70 @@ class PopulationDecoder:
             return float(value.item())
         return float(value)
 
-    def compute_phase_locked_weight(self, spike_train, t_vec, f0=200.0):
+    def compute_phase_locked_weight(self, signal_train, t_vec, f0=200.0):
         if self.use_gpu:
-            spikes = cp.asarray(spike_train, dtype=cp.float64)
+            signal_arr = cp.asarray(signal_train, dtype=cp.float64)
             t = cp.asarray(t_vec, dtype=cp.float64)
             phases = cp.exp(-1j * 2.0 * cp.pi * f0 * t)
-            return cp.abs(cp.sum(spikes * phases, axis=1))
+            return cp.sum(signal_arr * phases, axis=1)
 
-        spikes = np.asarray(spike_train, dtype=np.float64)
+        signal_arr = np.asarray(signal_train, dtype=np.float64)
         t = np.asarray(t_vec, dtype=np.float64)
         phases = np.exp(-1j * 2.0 * np.pi * f0 * t)
-        return np.abs(np.sum(spikes * phases, axis=1))
+        return np.sum(signal_arr * phases, axis=1)
 
-    def build_phase_locked_density_map(self, phase_weights, receptor_coords):
+    def build_vector_phase_field(self, spikes_x, spikes_y, t_vec, fidelity_weights, f0=200.0):
+        qx = self.compute_phase_locked_weight(spikes_x, t_vec, f0=f0)
+        qy = self.compute_phase_locked_weight(spikes_y, t_vec, f0=f0)
+        xp = cp if self.use_gpu else np
+        fidelity = xp.asarray(fidelity_weights, dtype=xp.float64)
+        return fidelity * qx, fidelity * qy
+
+    def build_phase_locked_density_map(self, qx_complex, qy_complex, receptor_coords):
         if self.use_gpu:
-            phase_weights = cp.asarray(phase_weights, dtype=cp.float64)
+            qx_complex = cp.asarray(qx_complex, dtype=cp.complex128)
+            qy_complex = cp.asarray(qy_complex, dtype=cp.complex128)
         else:
-            phase_weights = np.asarray(phase_weights, dtype=np.float64)
+            qx_complex = np.asarray(qx_complex, dtype=np.complex128)
+            qy_complex = np.asarray(qy_complex, dtype=np.complex128)
 
         self._ensure_kernel(receptor_coords)
-        density_flat = self._gaussian_kernel @ phase_weights
+        psi_x_flat = self._gaussian_kernel @ qx_complex
+        psi_y_flat = self._gaussian_kernel @ qy_complex
         n = self._grid_vec.size
-        return density_flat.reshape(n, n)
+        psi_x = psi_x_flat.reshape(n, n)
+        psi_y = psi_y_flat.reshape(n, n)
+        rho_map = (cp.sqrt(cp.abs(psi_x) ** 2 + cp.abs(psi_y) ** 2) if self.use_gpu
+                   else np.sqrt(np.abs(psi_x) ** 2 + np.abs(psi_y) ** 2))
+        return psi_x, psi_y, rho_map
 
-    def compute_core_map_metrics(self, phase_weights, receptor_coords):
-        density_map = self.build_phase_locked_density_map(phase_weights, receptor_coords)
-        rho_max = cp.max(density_map) if self.use_gpu else np.max(density_map)
+    def compute_directional_concentration(self, psi_x, psi_y):
+        xp = cp if self.use_gpu else np
+        fft_x = xp.fft.fft2(psi_x)
+        fft_y = xp.fft.fft2(psi_y)
+        energy = xp.abs(fft_x) ** 2 + xp.abs(fft_y) ** 2
+        total_energy = xp.sum(energy)
+        total_energy_scalar = self._to_float(total_energy)
+        if total_energy_scalar <= 0.0:
+            return 0.0, energy
+        peak_energy = xp.max(energy)
+        ndwci = self._to_float(peak_energy / (total_energy + 1e-12))
+        return ndwci, energy
+
+    def compute_core_map_metrics(self, qx_complex, qy_complex, receptor_coords):
+        psi_x, psi_y, rho_map = self.build_phase_locked_density_map(qx_complex, qy_complex, receptor_coords)
+        rho_max = cp.max(rho_map) if self.use_gpu else np.max(rho_map)
         rho_max_scalar = self._to_float(rho_max)
-
         if rho_max_scalar <= 0.0:
-            return 0.0, 0.0, density_map
+            zero_energy = cp.zeros_like(rho_map) if self.use_gpu else np.zeros_like(rho_map)
+            return 0.0, 0.0, 0.0, rho_map, psi_x, psi_y, zero_energy
 
-        mask = density_map >= (0.5 * rho_max)
+        ndwci, energy_map = self.compute_directional_concentration(psi_x, psi_y)
+        intensity = rho_max_scalar * ndwci
+
+        mask = rho_map >= (0.5 * rho_max)
         area_pixels = cp.sum(mask) if self.use_gpu else np.sum(mask)
-        area_mm2 = self._to_float(area_pixels) * (self.density_grid ** 2)
-        if area_mm2 <= 0.0:
-            return rho_max_scalar, 0.0, density_map
-
-        clarity = -np.log(area_mm2 / self.roi_area)
-        return rho_max_scalar, float(clarity), density_map
+        area_fraction = (self._to_float(area_pixels) * (self.density_grid ** 2)) / self.roi_area
+        area_fraction = max(area_fraction, 1e-12)
+        clarity = float(-np.log(area_fraction) * ndwci)
+        return intensity, clarity, rho_max_scalar, rho_map, psi_x, psi_y, energy_map

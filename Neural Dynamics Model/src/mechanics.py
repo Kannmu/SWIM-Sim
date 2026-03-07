@@ -107,43 +107,6 @@ class StressProcessor:
             zi_array[sec, :, :] = zi[sec][None, :] * first_sample[:, None]
         return zi_array
 
-    @staticmethod
-    def _signed_axis_projection_cpu(tangent_signals, steady_start_idx):
-        n_receptors, _, _ = tangent_signals.shape
-        projected = np.zeros((n_receptors, tangent_signals.shape[2]), dtype=np.float64)
-        principal_axes = np.zeros((n_receptors, 2), dtype=np.float64)
-
-        for i in range(n_receptors):
-            steady = tangent_signals[i, :, steady_start_idx:]
-            if steady.shape[1] == 0:
-                steady = tangent_signals[i]
-            steady_centered = steady - np.mean(steady, axis=1, keepdims=True)
-            cov = steady_centered @ steady_centered.T
-            eigvals, eigvecs = np.linalg.eigh(cov)
-            axis = eigvecs[:, int(np.argmax(eigvals))]
-            axis = axis / (np.linalg.norm(axis) + 1e-12)
-            if axis[0] < 0:
-                axis = -axis
-            principal_axes[i] = axis
-            projected[i] = axis[0] * tangent_signals[i, 0, :] + axis[1] * tangent_signals[i, 1, :]
-
-        return projected, principal_axes
-
-    @staticmethod
-    def _signed_axis_projection_gpu(tangent_signals, steady_start_idx):
-        steady = tangent_signals[:, :, steady_start_idx:]
-        if steady.shape[2] == 0:
-            steady = tangent_signals
-        steady_centered = steady - cp.mean(steady, axis=2, keepdims=True)
-        cov = cp.matmul(steady_centered, cp.transpose(steady_centered, (0, 2, 1)))
-        eigvals, eigvecs = cp.linalg.eigh(cov)
-        axis = eigvecs[:, :, -1]
-        axis = axis / (cp.linalg.norm(axis, axis=1, keepdims=True) + 1e-12)
-        sign_flip = cp.where(axis[:, 0:1] < 0, -1.0, 1.0)
-        axis = axis * sign_flip
-        projected = cp.sum(axis[:, :, None] * tangent_signals, axis=1)
-        return projected, axis
-
     def _interpolate_gpu(self, smoothed_stress, cache):
         x0 = cp.asarray(cache["x0_idx"])
         x1 = cp.asarray(cache["x1_idx"])
@@ -197,19 +160,48 @@ class StressProcessor:
             return cpx_signal.resample(signals, target_len, axis=-1)
         return scipy.signal.resample(signals, target_len, axis=-1)
 
-    def _filter_signed_scalar(self, signed_scalar):
+    def _filter_component(self, stress_component):
         if self.use_gpu:
-            detrended = signed_scalar - cp.mean(signed_scalar, axis=1, keepdims=True)
+            detrended = stress_component - cp.mean(stress_component, axis=1, keepdims=True)
             zi = cpx_signal.sosfilt_zi(self.sos_gpu)
             zi_array = self._build_sos_zi_array_gpu(zi, detrended[:, 0])
             filtered, _ = cpx_signal.sosfilt(self.sos_gpu, detrended, axis=1, zi=zi_array)
             return filtered
 
-        detrended = signed_scalar - np.mean(signed_scalar, axis=1, keepdims=True)
+        detrended = stress_component - np.mean(stress_component, axis=1, keepdims=True)
         zi = scipy.signal.sosfilt_zi(self.sos)
         zi_array = self._build_sos_zi_array(zi, detrended[:, 0])
         filtered, _ = scipy.signal.sosfilt(self.sos, detrended, axis=1, zi=zi_array)
         return filtered
+
+    def _compute_frequency_power(self, signal_component, freq_hz):
+        xp = cp if self.use_gpu else np
+        signal_arr = xp.asarray(signal_component, dtype=xp.float64)
+        n_time = signal_arr.shape[1]
+        if n_time <= 0:
+            raise ValueError("Continuous receptor drive must contain at least one sample.")
+        t_vec = xp.arange(n_time, dtype=xp.float64) / self.fs
+        phase = xp.exp(-1j * 2.0 * xp.pi * float(freq_hz) * t_vec)
+        coeff = xp.sum(signal_arr * phase[None, :], axis=1)
+        return xp.abs(coeff) ** 2
+
+    def compute_drive_frequency_fidelity(self, drive_x, drive_y, fidelity_freqs_hz, target_freq_hz=200.0):
+        xp = cp if self.use_gpu else np
+        power_sum = None
+        target_power = None
+
+        for freq in fidelity_freqs_hz:
+            px = self._compute_frequency_power(drive_x, freq)
+            py = self._compute_frequency_power(drive_y, freq)
+            power = px + py
+            if int(round(freq)) == int(round(target_freq_hz)):
+                target_power = power
+            power_sum = power if power_sum is None else (power_sum + power)
+
+        if target_power is None:
+            raise ValueError("Continuous-drive fidelity requires the target frequency in fidelity_freqs_hz.")
+
+        return target_power / (power_sum + 1e-12)
 
     def process(self, stress_xz, stress_yz, x_vec, y_vec, receptor_coords, original_dt):
         if stress_xz is None or stress_yz is None:
@@ -238,19 +230,25 @@ class StressProcessor:
             yz_raw = self._interpolate_gpu(yz_smooth, cache)
 
             target_len = None if abs(input_fs - self.fs) <= 1.0 else int(round(t_samples * self.fs / input_fs))
-            xz_final = self._resample_signals(xz_raw, input_fs, target_len=target_len)
-            yz_final = self._resample_signals(yz_raw, input_fs, target_len=target_len)
-            n_time = xz_final.shape[1]
+            xz_drive = self._resample_signals(xz_raw, input_fs, target_len=target_len)
+            yz_drive = self._resample_signals(yz_raw, input_fs, target_len=target_len)
+            xz_filtered = self._filter_component(xz_drive)
+            yz_filtered = self._filter_component(yz_drive)
+            n_time = xz_filtered.shape[1]
             t_vec_new = cp.arange(n_time, dtype=cp.float64) / self.fs
-            steady_window_samples = max(1, int(round(self.pca_window_ms * 1e-3 * self.fs)))
-            steady_start_idx = max(0, n_time - steady_window_samples)
-            tangent = cp.stack((xz_final, yz_final), axis=1)
-            signed_scalar, principal_axes = self._signed_axis_projection_gpu(tangent, steady_start_idx)
-            filtered = self._filter_signed_scalar(signed_scalar)
-            if cp.any(cp.isnan(filtered)) or cp.any(cp.isinf(filtered)):
-                print("WARNING: NaNs or Infs detected in filtered_signals (GPU)!")
-            raw_components = {'xz': xz_final, 'yz': yz_final, 'signed': signed_scalar, 'principal_axes': principal_axes}
-            return filtered, t_vec_new, raw_components
+
+            if cp.any(cp.isnan(xz_filtered)) or cp.any(cp.isinf(xz_filtered)):
+                print("WARNING: NaNs or Infs detected in xz_filtered (GPU)!")
+            if cp.any(cp.isnan(yz_filtered)) or cp.any(cp.isinf(yz_filtered)):
+                print("WARNING: NaNs or Infs detected in yz_filtered (GPU)!")
+
+            return {
+                'xz': xz_filtered,
+                'yz': yz_filtered,
+                'drive_xz': xz_drive,
+                'drive_yz': yz_drive,
+                't': t_vec_new,
+            }
 
         xz_smooth = scipy.ndimage.gaussian_filter(stress_xz, sigma=[0, sigma_pixels_x, sigma_pixels_y], mode='nearest')
         yz_smooth = scipy.ndimage.gaussian_filter(stress_yz, sigma=[0, sigma_pixels_x, sigma_pixels_y], mode='nearest')
@@ -259,19 +257,23 @@ class StressProcessor:
         yz_raw = self._interpolate_cpu(yz_smooth, cache)
 
         target_len = None if abs(input_fs - self.fs) <= 1.0 else int(round(t_samples * self.fs / input_fs))
-        xz_final = self._resample_signals(xz_raw, input_fs, target_len=target_len)
-        yz_final = self._resample_signals(yz_raw, input_fs, target_len=target_len)
+        xz_drive = self._resample_signals(xz_raw, input_fs, target_len=target_len)
+        yz_drive = self._resample_signals(yz_raw, input_fs, target_len=target_len)
 
-        n_time = xz_final.shape[1]
+        xz_filtered = self._filter_component(xz_drive)
+        yz_filtered = self._filter_component(yz_drive)
+        n_time = xz_filtered.shape[1]
         t_vec_new = np.arange(n_time, dtype=np.float64) / self.fs
-        steady_window_samples = max(1, int(round(self.pca_window_ms * 1e-3 * self.fs)))
-        steady_start_idx = max(0, n_time - steady_window_samples)
-        tangent = np.stack((xz_final, yz_final), axis=1)
-        signed_scalar, principal_axes = self._signed_axis_projection_cpu(tangent, steady_start_idx)
-        filtered = self._filter_signed_scalar(signed_scalar)
 
-        if np.any(np.isnan(filtered)) or np.any(np.isinf(filtered)):
-            print("WARNING: NaNs or Infs detected in filtered_signals (CPU)!")
+        if np.any(np.isnan(xz_filtered)) or np.any(np.isinf(xz_filtered)):
+            print("WARNING: NaNs or Infs detected in xz_filtered (CPU)!")
+        if np.any(np.isnan(yz_filtered)) or np.any(np.isinf(yz_filtered)):
+            print("WARNING: NaNs or Infs detected in yz_filtered (CPU)!")
 
-        raw_components = {'xz': xz_final, 'yz': yz_final, 'signed': signed_scalar, 'principal_axes': principal_axes}
-        return filtered, t_vec_new, raw_components
+        return {
+            'xz': xz_filtered,
+            'yz': yz_filtered,
+            'drive_xz': xz_drive,
+            'drive_yz': yz_drive,
+            't': t_vec_new,
+        }

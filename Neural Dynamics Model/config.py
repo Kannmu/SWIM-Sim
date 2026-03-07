@@ -13,15 +13,15 @@ MIN_DISTANCE_MM = 1.8
 RANDOM_SEED = 2025
 
 # Spatial Pooling Parameters
-SPATIAL_SIGMA_MM = 2.0  # Gaussian kernel sigma for spatial pooling
+SPATIAL_SIGMA_MM = 2.0  # Gaussian kernel sigma for spatial smoothing before receptor interpolation
 PCA_STEADY_STATE_WINDOW_MS = 50.0
 
 # Biomechanical Filter Parameters
 FS_MODEL = 10000.0  # 10 kHz
 DT_MS = 0.1         # 0.1 ms (derived from FS_MODEL)
 FILTER_ORDER = 4
-F_LOW_HZ = 100.0
-F_HIGH_HZ = 400.0
+F_LOW_HZ = 80.0
+F_HIGH_HZ = 900.0
 
 # LIF Model Parameters
 TAU_M_MS = 2.0      # Membrane time constant
@@ -35,6 +35,7 @@ GLOBAL_GAIN = 1.0   # To be calibrated
 # Decoding Parameters
 DECODING_WINDOW_MS = 50.0
 PHASE_LOCK_F0_HZ = 200.0
+FIDELITY_FREQS_HZ = (200.0, 400.0, 600.0, 800.0)
 DENSITY_GRID_MM = 1.0
 DENSITY_SIGMA_MM = 2.0
 
