@@ -243,12 +243,22 @@ def main():
             fidelity_weights,
             f0=config.PHASE_LOCK_F0_HZ
         )
-        intensity, clarity, rho_max, density_map, psi_x, psi_y, energy_map = decoder.compute_core_map_metrics(
+        metrics = decoder.compute_core_map_metrics(
             qx_complex,
             qy_complex,
-            receptor_coords
+            receptor_coords,
+            spikes_x=spikes_x_win,
+            spikes_y=spikes_y_win,
+            dt_ms=config.DT_MS,
+            fidelity_weights=fidelity_weights,
         )
-        ndwci, _ = decoder.compute_directional_concentration(psi_x, psi_y)
+        intensity = metrics['intensity']
+        clarity = metrics['clarity']
+        rho_max = metrics['rho_max']
+        energy_map = metrics['energy_map']
+        ndwci = metrics['ndwci']
+        isharp = metrics['iSharp']
+        mean_ffi = metrics['mean_ffi']
 
         total_spikes_x = _to_int(cp.sum(spikes_x_win) if _is_gpu_array(spikes_x_win) else np.sum(spikes_x_win))
         total_spikes_y = _to_int(cp.sum(spikes_y_win) if _is_gpu_array(spikes_y_win) else np.sum(spikes_y_win))
@@ -259,13 +269,15 @@ def main():
         print(
             f"DEBUG: Spikes in window total_x={total_spikes_x}, total_y={total_spikes_y}, "
             f"max_|qx|={qx_max:.4f}, max_|qy|={qy_max:.4f}, rho_max={rho_max:.4f}, "
-            f"nDWCI={ndwci:.4f}, fidelity_max={fidelity_max:.4f}, spectral_peak={energy_peak:.4f}"
+            f"nDWCI={ndwci:.4f}, iSharp={isharp:.4f}, mean_FFI={mean_ffi:.4f}, fidelity_max={fidelity_max:.4f}, spectral_peak={energy_peak:.4f}"
         )
 
         results_summary[method_name] = {
             'Intensity': intensity,
             'SpatialClarity': clarity,
             'nDWCI': ndwci,
+            'iSharp': isharp,
+            'MeanFFI': mean_ffi,
             'RhoMax': rho_max,
         }
         
@@ -273,14 +285,14 @@ def main():
         print(f"DEBUG: Method {method_name} finished in {t1 - t0:.2f}s")
 
     print("\n=== Final Results ===")
-    print(f"{'Method':<10} | {'Intensity':<10} | {'Clarity':<10} | {'nDWCI':<10} | {'RhoMax':<10}")
-    print("-" * 78)
+    print(f"{'Method':<10} | {'Intensity':<10} | {'Clarity':<10} | {'iSharp':<10} | {'MeanFFI':<10} | {'nDWCI':<10} | {'RhoMax':<10}")
+    print("-" * 110)
     for name in config.STIMULUS_METHODS:
         if name in results_summary:
             res = results_summary[name]
             print(
                 f"{name:<10} | {res['Intensity']:<10.3f} | {res['SpatialClarity']:<10.3f} | "
-                f"{res['nDWCI']:<10.3f} | {res['RhoMax']:<10.3f}"
+                f"{res['iSharp']:<10.3f} | {res['MeanFFI']:<10.3f} | {res['nDWCI']:<10.3f} | {res['RhoMax']:<10.3f}"
             )
 
     print("\nDone.")
