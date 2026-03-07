@@ -13,7 +13,19 @@ except Exception:
 
 
 class StressProcessor:
-    def __init__(self, fs, filter_order, f_low, f_high, spatial_sigma, pca_window_ms, use_gpu=False):
+    def __init__(
+        self,
+        fs,
+        filter_order,
+        f_low,
+        f_high,
+        spatial_sigma,
+        pca_window_ms,
+        use_gpu=False,
+        enable_temporal_tuning=False,
+        temporal_tuning_center_hz=200.0,
+        temporal_tuning_sigma_oct=0.75,
+    ):
         self.fs = fs
         self.filter_order = filter_order
         self.f_low = f_low
@@ -21,6 +33,9 @@ class StressProcessor:
         self.spatial_sigma = spatial_sigma
         self.pca_window_ms = pca_window_ms
         self.use_gpu = bool(use_gpu and cp is not None)
+        self.enable_temporal_tuning = bool(enable_temporal_tuning)
+        self.temporal_tuning_center_hz = float(temporal_tuning_center_hz)
+        self.temporal_tuning_sigma_oct = float(temporal_tuning_sigma_oct)
 
         self.sos = scipy.signal.butter(
             N=self.filter_order,
@@ -84,6 +99,68 @@ class StressProcessor:
         }
         self._cache[cache_key] = cached
         return cached
+
+    def _apply_temporal_tuning(self, signals):
+        if not self.enable_temporal_tuning:
+            return signals
+
+        center_hz = float(self.temporal_tuning_center_hz)
+        sigma_oct = float(self.temporal_tuning_sigma_oct)
+
+        if center_hz <= 0.0 or sigma_oct <= 0.0:
+            return signals
+
+        xp = cp if self.use_gpu else np
+        X = xp.asarray(signals, dtype=xp.float64)
+        n_time = X.shape[1]
+
+        freqs_np = np.fft.rfftfreq(n_time, d=1.0 / self.fs)
+        weight_np = np.zeros_like(freqs_np, dtype=np.float64)
+
+        pos = freqs_np > 0.0
+        log_ratio = np.log2(freqs_np[pos] / center_hz)
+        weight_np[pos] = np.exp(-0.5 * (log_ratio / sigma_oct) ** 2)
+
+        weight = xp.asarray(weight_np, dtype=xp.float64)
+
+        spectrum = xp.fft.rfft(X, axis=1)
+        tuned = xp.fft.irfft(spectrum * weight[None, :], n=n_time, axis=1)
+        return tuned
+
+    def temporal_tuning_weight(self, freq_hz):
+        if not self.enable_temporal_tuning:
+            return 1.0
+
+        center_hz = float(self.temporal_tuning_center_hz)
+        sigma_oct = float(self.temporal_tuning_sigma_oct)
+        freq_hz = float(freq_hz)
+
+        if center_hz <= 0.0 or sigma_oct <= 0.0 or freq_hz <= 0.0:
+            return 1.0
+
+        log_ratio = np.log2(freq_hz / center_hz)
+        return float(np.exp(-0.5 * (log_ratio / sigma_oct) ** 2))
+
+    def filter_receptor_drives(self, drive_x, drive_y):
+        if drive_x is None or drive_y is None:
+            raise ValueError("drive_x and drive_y are required.")
+        if np.shape(drive_x) != np.shape(drive_y):
+            raise ValueError(f"Drive shape mismatch: {np.shape(drive_x)} vs {np.shape(drive_y)}")
+
+        if self.use_gpu:
+            x = cp.asarray(drive_x, dtype=cp.float64)
+            y = cp.asarray(drive_y, dtype=cp.float64)
+        else:
+            x = np.asarray(drive_x, dtype=np.float64)
+            y = np.asarray(drive_y, dtype=np.float64)
+
+        x_filtered = self._filter_component(x)
+        y_filtered = self._filter_component(y)
+
+        x_filtered = self._apply_temporal_tuning(x_filtered)
+        y_filtered = self._apply_temporal_tuning(y_filtered)
+
+        return x_filtered, y_filtered
 
     @staticmethod
     def _build_sos_zi_array(zi, first_sample):
@@ -231,8 +308,7 @@ class StressProcessor:
             target_len = None if abs(input_fs - self.fs) <= 1.0 else int(round(t_samples * self.fs / input_fs))
             xz_drive = self._resample_signals(xz_raw, input_fs, target_len=target_len)
             yz_drive = self._resample_signals(yz_raw, input_fs, target_len=target_len)
-            xz_filtered = self._filter_component(xz_drive)
-            yz_filtered = self._filter_component(yz_drive)
+            xz_filtered, yz_filtered = self.filter_receptor_drives(xz_drive, yz_drive)
             n_time = xz_filtered.shape[1]
             t_vec_new = cp.arange(n_time, dtype=cp.float64) / self.fs
 
@@ -259,8 +335,7 @@ class StressProcessor:
         xz_drive = self._resample_signals(xz_raw, input_fs, target_len=target_len)
         yz_drive = self._resample_signals(yz_raw, input_fs, target_len=target_len)
 
-        xz_filtered = self._filter_component(xz_drive)
-        yz_filtered = self._filter_component(yz_drive)
+        xz_filtered, yz_filtered = self.filter_receptor_drives(xz_drive, yz_drive)
         n_time = xz_filtered.shape[1]
         t_vec_new = np.arange(n_time, dtype=np.float64) / self.fs
 
