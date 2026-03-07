@@ -75,6 +75,11 @@ class PopulationDecoder:
         density_map = density_flat.reshape(n, n)
 
         rho_max = cp.max(density_map) if self.use_gpu else np.max(density_map)
+        
+        # DEBUG: Log density map stats
+        total_counts = cp.sum(spike_counts) if self.use_gpu else np.sum(spike_counts)
+        print(f"DEBUG: Clarity: total_counts={total_counts}, rho_max={rho_max:.4f}")
+
         if rho_max == 0:
             return 0.0
 
@@ -85,6 +90,8 @@ class PopulationDecoder:
 
         if area_mm2 == 0:
             return 0.0
+            
+        print(f"DEBUG: Clarity: area_mm2={area_mm2:.4f}, roi_area={self.roi_area:.4f}")
 
         if self.use_gpu:
             score = -cp.log(area_mm2 / self.roi_area)

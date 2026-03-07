@@ -178,7 +178,26 @@ def main():
         max_signal = _to_float(cp.max(S_filt) if _is_gpu_array(S_filt) else np.max(S_filt))
         print(f"\nMethod {method_name}: Max Filtered Signal = {max_signal:.2f}")
 
+        # DEBUG: Log S_filt stats
+        s_min = _to_float(cp.min(S_filt) if _is_gpu_array(S_filt) else np.min(S_filt))
+        s_mean = _to_float(cp.mean(S_filt) if _is_gpu_array(S_filt) else np.mean(S_filt))
+        print(f"DEBUG: S_filt stats: min={s_min:.4f}, mean={s_mean:.4f}, max={max_signal:.4f}")
+        
+        # DEBUG: Log t_vec info
+        t_len = len(t_vec)
+        if t_len > 1:
+            dt_step = _to_float(t_vec[1] - t_vec[0])
+            print(f"DEBUG: t_vec: len={t_len}, start={_to_float(t_vec[0]):.4f}, end={_to_float(t_vec[-1]):.4f}, dt={dt_step:.6f}")
+        else:
+            print(f"DEBUG: t_vec length is {t_len}")
+
         currents = lif.compute_current(S_filt, gamma)
+        
+        # DEBUG: Log currents stats
+        c_max = _to_float(cp.max(currents) if _is_gpu_array(currents) else np.max(currents))
+        c_mean = _to_float(cp.mean(currents) if _is_gpu_array(currents) else np.mean(currents))
+        print(f"DEBUG: Currents stats: mean={c_mean:.4f}, max={c_max:.4f} (Gamma={gamma:.4f})")
+        
         spikes = lif.run(currents)
 
         t_end = _to_float(t_vec[-1])
@@ -188,38 +207,39 @@ def main():
         else:
             win_idx = np.flatnonzero(t_vec >= t_start_win)
 
+        # DEBUG: Log window info
+        print(f"DEBUG: Window analysis: start={t_start_win:.4f}, end={t_end:.4f}, num_samples={len(win_idx)}")
+
         spikes_win = spikes[:, win_idx]
         if _is_gpu_array(spikes_win):
             spike_counts_win = cp.sum(spikes_win, axis=1)
         else:
             spike_counts_win = np.sum(spikes_win, axis=1)
 
+        # DEBUG: Log spike stats
+        total_spikes = _to_int(cp.sum(spike_counts_win) if _is_gpu_array(spike_counts_win) else np.sum(spike_counts_win))
+        max_spikes = _to_int(cp.max(spike_counts_win) if _is_gpu_array(spike_counts_win) else np.max(spike_counts_win))
+        print(f"DEBUG: Spikes in window: total={total_spikes}, max_per_neuron={max_spikes}")
+
         intensity = _to_float(cp.sum(spike_counts_win) if _is_gpu_array(spike_counts_win) else np.sum(spike_counts_win))
         clarity = decoder.compute_spatial_clarity_from_counts(spike_counts_win, receptor_coords)
 
         S_raw_win = S_raw[:, win_idx]
 
-        ffi = decoder.compute_ffi(
-            S_raw_win,
-            config.FS_MODEL,
-            (config.FFI_SIGNAL_WINDOW_START_HZ, config.FFI_SIGNAL_WINDOW_END_HZ),
-            (config.FFI_NOISE_WINDOW_START_HZ, config.FFI_NOISE_WINDOW_END_HZ),
-            epsilon=config.FFI_EPSILON
-        )
-
         results_summary[method_name] = {
             'Intensity': intensity,
             'SpatialClarity': clarity,
-            'FFI': ffi
         }
 
     print("\n=== Final Results ===")
-    print(f"{'Method':<10} | {'Intensity':<10} | {'Clarity':<10} | {'FFI':<10}")
+    print(f"{'Method':<10} | {'Intensity':<10} | {'Clarity':<10}")
     print("-" * 50)
     for name in config.STIMULUS_METHODS:
         if name in results_summary:
             res = results_summary[name]
-            print(f"{name:<10} | {res['Intensity']:<10.1f} | {res['SpatialClarity']:<10.3f} | {res['FFI']:<10.3f}")
+            print(f"{name:<10} | {res['Intensity']:<10.1f} | {res['SpatialClarity']:<10.3f}")
+
+
 
     print("\nDone.")
 

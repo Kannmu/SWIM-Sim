@@ -55,8 +55,23 @@ class DataLoader:
                     continue
 
                 tau_roi = method_group['tau_roi_steady'][()]
-                
                 tau_roi = np.transpose(tau_roi, (0, 2, 1))
+
+                tau_xz = None
+                tau_xy = None
+                tau_yz = None
+
+                if 'tau_roi_steady_xz' in method_group:
+                    tau_xz = method_group['tau_roi_steady_xz'][()]
+                    tau_xz = np.transpose(tau_xz, (0, 2, 1))
+                
+                if 'tau_roi_steady_xy' in method_group:
+                    tau_xy = method_group['tau_roi_steady_xy'][()]
+                    tau_xy = np.transpose(tau_xy, (0, 2, 1))
+
+                if 'tau_roi_steady_yz' in method_group:
+                    tau_yz = method_group['tau_roi_steady_yz'][()]
+                    tau_yz = np.transpose(tau_yz, (0, 2, 1))
                 
                 # Also extract time vector
                 t_vec = method_group['t_vec_steady'][()].flatten()
@@ -67,6 +82,9 @@ class DataLoader:
                 
                 methods_data[name] = {
                     'stress_magnitude': tau_roi,
+                    'stress_xz': tau_xz,
+                    'stress_xy': tau_xy,
+                    'stress_yz': tau_yz,
                     't_vec': t_vec,
                     'roi_x': roi_x,
                     'roi_y': roi_y

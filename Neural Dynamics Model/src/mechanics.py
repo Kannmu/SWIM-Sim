@@ -97,8 +97,9 @@ class StressProcessor:
         zi = np.asarray(zi, dtype=np.float64)
         first_sample = np.asarray(first_sample, dtype=np.float64)
         n_sections = zi.shape[0]
+        n_states = zi.shape[-1]
         n_receptors = first_sample.shape[0]
-        zi_array = np.empty((n_sections, n_receptors, 2), dtype=np.float64)
+        zi_array = np.empty((n_sections, n_receptors, n_states), dtype=np.float64)
         for sec in range(n_sections):
             zi_array[sec, :, :] = zi[sec][None, :] * first_sample[:, None]
         return zi_array
@@ -106,8 +107,9 @@ class StressProcessor:
     @staticmethod
     def _build_sos_zi_array_gpu(zi, first_sample):
         n_sections = zi.shape[0]
+        n_states = zi.shape[-1]
         n_receptors = first_sample.shape[0]
-        zi_array = cp.empty((n_sections, n_receptors, 2), dtype=cp.float64)
+        zi_array = cp.empty((n_sections, n_receptors, n_states), dtype=cp.float64)
         for sec in range(n_sections):
             zi_array[sec, :, :] = zi[sec][None, :] * first_sample[:, None]
         return zi_array
@@ -144,12 +146,15 @@ class StressProcessor:
         return cp.transpose(raw_tn, (1, 0))
 
     def process(self, stress_tensor, x_vec, y_vec, receptor_coords, original_dt):
+        print(f"DEBUG: StressProcessor.process input shape: {stress_tensor.shape}, dt: {original_dt}")
         T, _, _ = stress_tensor.shape
 
-        dx = x_vec[1] - x_vec[0]
-        dy = y_vec[1] - y_vec[0]
-        sigma_pixels_x = self.spatial_sigma / dx
-        sigma_pixels_y = self.spatial_sigma / dy
+        dx_mm = (x_vec[1] - x_vec[0]) * 1000.0
+        dy_mm = (y_vec[1] - y_vec[0]) * 1000.0
+        
+        # Calculate kernel sigma in terms of grid pixels
+        sigma_pixels_x = self.spatial_sigma / dx_mm
+        sigma_pixels_y = self.spatial_sigma / dy_mm
 
         cache = self._get_interpolation_cache(T, x_vec, y_vec, receptor_coords)
         input_fs = 1.0 / original_dt
@@ -165,6 +170,7 @@ class StressProcessor:
 
             if abs(input_fs - self.fs) > 1.0:
                 num_samples_new = int(T * self.fs / input_fs)
+                print(f"DEBUG: Resampling from {input_fs:.1f}Hz to {self.fs:.1f}Hz. Samples: {T} -> {num_samples_new}")
                 final_signals = cpx_signal.resample(raw_signals, num_samples_new, axis=1)
                 t_vec_new = cp.arange(num_samples_new, dtype=cp.float64) / self.fs
             else:
@@ -175,6 +181,11 @@ class StressProcessor:
             zi = cpx_signal.sosfilt_zi(self.sos_gpu)
             zi_array = self._build_sos_zi_array_gpu(zi, detrended_signals[:, 0])
             filtered_signals, _ = cpx_signal.sosfilt(self.sos_gpu, detrended_signals, axis=1, zi=zi_array)
+            
+            # DEBUG: Check for NaNs or Infs
+            if cp.any(cp.isnan(filtered_signals)) or cp.any(cp.isinf(filtered_signals)):
+                print("WARNING: NaNs or Infs detected in filtered_signals (GPU)!")
+                
             return filtered_signals, t_vec_new, final_signals
 
         smoothed_stress = scipy.ndimage.gaussian_filter(
@@ -186,6 +197,7 @@ class StressProcessor:
 
         if abs(input_fs - self.fs) > 1.0:
             num_samples_new = int(T * self.fs / input_fs)
+            print(f"DEBUG: Resampling from {input_fs:.1f}Hz to {self.fs:.1f}Hz. Samples: {T} -> {num_samples_new}")
             final_signals = scipy.signal.resample(raw_signals, num_samples_new, axis=1)
             t_vec_new = np.arange(num_samples_new, dtype=np.float64) / self.fs
         else:
@@ -196,4 +208,8 @@ class StressProcessor:
         zi = scipy.signal.sosfilt_zi(self.sos)
         zi_array = self._build_sos_zi_array(zi, detrended_signals[:, 0])
         filtered_signals, _ = scipy.signal.sosfilt(self.sos, detrended_signals, axis=1, zi=zi_array)
+        
+        if np.any(np.isnan(filtered_signals)) or np.any(np.isinf(filtered_signals)):
+             print("WARNING: NaNs or Infs detected in filtered_signals (CPU)!")
+             
         return filtered_signals, t_vec_new, final_signals

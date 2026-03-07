@@ -19,6 +19,7 @@ class LIFModel:
         self.use_gpu = bool(use_gpu and cuda.is_available())
 
         self.ref_steps = int(t_ref / dt)
+        print(f"DEBUG: LIFModel initialized. dt={dt}, t_ref={t_ref}, ref_steps={self.ref_steps}")
 
     def run(self, input_current):
         if self.use_gpu:
@@ -190,16 +191,25 @@ def _run_lif_count_cuda_kernel(input_current, spike_counts, v_rest, v_reset, v_t
 def run_lif_cuda(input_current, v_rest, v_reset, v_thresh, r_m, tau_m, dt, ref_steps):
     alpha = dt / tau_m
     is_cupy_input = _is_cupy_array(input_current)
-    current_gpu = input_current if is_cupy_input else cuda.to_device(np.asarray(input_current, dtype=np.float64))
+    
+    if is_cupy_input:
+        current_gpu = input_current
+        # Initialize with zeros using cupy
+        spike_gpu = cp.zeros(current_gpu.shape, dtype=cp.uint8)
+    else:
+        current_gpu = cuda.to_device(np.asarray(input_current, dtype=np.float64))
+        # Initialize with zeros using numpy -> device to ensure clean memory
+        spike_gpu = cuda.to_device(np.zeros(current_gpu.shape, dtype=np.uint8))
+
     N, T = current_gpu.shape
-    spike_gpu = cuda.device_array((N, T), dtype=np.uint8)
     threads_per_block = 256
     blocks = (N + threads_per_block - 1) // threads_per_block
     _run_lif_cuda_kernel[blocks, threads_per_block](
         current_gpu, spike_gpu, v_rest, v_reset, v_thresh, r_m, alpha, ref_steps
     )
+    
     if is_cupy_input:
-        return cp.asarray(spike_gpu).astype(cp.bool_)
+        return spike_gpu.astype(cp.bool_)
     return spike_gpu.copy_to_host().astype(np.bool_)
 
 
