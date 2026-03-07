@@ -207,15 +207,6 @@ class StressProcessor:
         if stress_xz is None or stress_yz is None:
             raise ValueError("Signed tangential stress inputs stress_xz and stress_yz are required.")
 
-        print(f"DEBUG: StressProcessor.process input shapes: xz={stress_xz.shape}, yz={stress_yz.shape}, dt={original_dt}")
-        xp = cp if self.use_gpu else np
-        if self.use_gpu:
-            stress_xz_cp = cp.asarray(stress_xz)
-            stress_yz_cp = cp.asarray(stress_yz)
-            print(f"DEBUG: Input stats (GPU): xz mean={float(cp.mean(stress_xz_cp)):.4f}, yz mean={float(cp.mean(stress_yz_cp)):.4f}")
-        else:
-            print(f"DEBUG: Input stats (CPU): xz mean={float(np.mean(stress_xz)):.4f}, yz mean={float(np.mean(stress_yz)):.4f}")
-
         if stress_xz.shape != stress_yz.shape:
             raise ValueError(f"stress_xz and stress_yz shape mismatch: {stress_xz.shape} vs {stress_yz.shape}")
 
@@ -246,11 +237,10 @@ class StressProcessor:
             t_vec_new = cp.arange(n_time, dtype=cp.float64) / self.fs
 
             if cp.any(cp.isnan(xz_filtered)) or cp.any(cp.isinf(xz_filtered)):
-                print("WARNING: NaNs or Infs detected in xz_filtered (GPU)!")
+                raise ValueError("NaNs or Infs detected in xz_filtered (GPU)")
             if cp.any(cp.isnan(yz_filtered)) or cp.any(cp.isinf(yz_filtered)):
-                print("WARNING: NaNs or Infs detected in yz_filtered (GPU)!")
+                raise ValueError("NaNs or Infs detected in yz_filtered (GPU)")
 
-            print(f"DEBUG: Filtered signal (GPU): xz mean={float(cp.mean(xz_filtered)):.4f}, std={float(cp.std(xz_filtered)):.4f}")
             return {
                 'xz': xz_filtered,
                 'yz': yz_filtered,
@@ -275,11 +265,9 @@ class StressProcessor:
         t_vec_new = np.arange(n_time, dtype=np.float64) / self.fs
 
         if np.any(np.isnan(xz_filtered)) or np.any(np.isinf(xz_filtered)):
-            print("WARNING: NaNs or Infs detected in xz_filtered (CPU)!")
+            raise ValueError("NaNs or Infs detected in xz_filtered (CPU)")
         if np.any(np.isnan(yz_filtered)) or np.any(np.isinf(yz_filtered)):
-            print("WARNING: NaNs or Infs detected in yz_filtered (CPU)!")
-
-        print(f"DEBUG: Filtered signal (CPU): xz mean={float(np.mean(xz_filtered)):.4f}, std={float(np.std(xz_filtered)):.4f}")
+            raise ValueError("NaNs or Infs detected in yz_filtered (CPU)")
 
         return {
             'xz': xz_filtered,

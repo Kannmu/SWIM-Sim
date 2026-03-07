@@ -14,39 +14,62 @@ RANDOM_SEED = 2025
 SEED_RUN_COUNT = 20
 SEED_STRIDE = 1
 
-# Spatial Pooling Parameters
-SPATIAL_SIGMA_MM = 2.0  # Gaussian kernel sigma for spatial smoothing before receptor interpolation
+# Spatial Pooling / Time Window Parameters
+SPATIAL_SIGMA_MM = 2.0
 PCA_STEADY_STATE_WINDOW_MS = 50.0
+STEADY_STATE_WINDOW_MS = 50.0
+TRIAL_BIN_MS = 1.0
 
 # Biomechanical Filter Parameters
-FS_MODEL = 10000.0  # 10 kHz
-DT_MS = 0.1         # 0.1 ms (derived from FS_MODEL)
+FS_MODEL = 10000.0
+DT_MS = 0.1
 FILTER_ORDER = 4
 F_LOW_HZ = 80.0
 F_HIGH_HZ = 900.0
 
 # LIF Model Parameters
-TAU_M_MS = 2.0      # Membrane time constant
+TAU_M_MS = 2.0
 V_REST = 0.0
 V_RESET = 0.0
 V_THRESH = 1.0
 R_M = 1.0
-T_REF_MS = 1.0      # Refractory period
-GLOBAL_GAIN = 1.0   # To be calibrated
+T_REF_MS = 1.0
 
-# Decoding Parameters
-DECODING_WINDOW_MS = 50.0
+# Calibration Parameters
+CALIBRATION_AM_FREQUENCIES_HZ = (200.0, 400.0)
+CALIBRATION_AMPLITUDE_LEVELS = (0.35, 0.55, 0.75, 0.95, 1.15)
+CALIBRATION_TRIALS_PER_LEVEL = 64
+CALIBRATION_SIGMOID_SLOPE = 6.0
+CALIBRATION_MAX_ITER = 6
+CALIBRATION_GAMMA_INIT = 1.0
+CALIBRATION_SIGMA_INIT = 0.08
+CALIBRATION_GAMMA_BOUNDS = (1e-3, 1e4)
+CALIBRATION_SIGMA_BOUNDS = (1e-4, 1.0)
+CALIBRATION_COARSE_TO_FINE = True
+CALIBRATION_TOPK = 6
+
+# Trial-Level Stochasticity
+TRIAL_COUNT = 200
+INPUT_NOISE_SIGMA = 0.0
+THRESHOLD_NOISE_FRACTION = 0.1
+ENABLE_INPUT_NOISE = True
+ENABLE_THRESHOLD_NOISE = True
+
+# PCA / Observer Parameters
+PCA_VARIANCE_RATIO = 0.95
+COVARIANCE_REG_EPS = 1e-6
+POSITION_DELTA_MM = 1.0
+BASELINE_CONDITION_NAME = '__baseline__'
+
+# Experiment 1 Stimuli
+STIMULUS_METHODS = ['DLM_2', 'DLM_3', 'ULM_L', 'LM_L', 'LM_C']
+PAIRWISE_METHODS = ['DLM_2', 'DLM_3', 'ULM_L', 'LM_L', 'LM_C']
+
+# Mechanistic explanation layer
 PHASE_LOCK_F0_HZ = 200.0
 FIDELITY_FREQS_HZ = (200.0, 400.0, 600.0, 800.0)
 DENSITY_GRID_MM = 1.0
 DENSITY_SIGMA_MM = 2.0
-
-
-# Simulation Parameters
-STIMULUS_METHODS = ['DLM_2', 'DLM_3', 'ULM_L', 'LM_L', 'LM_C']
-CALIBRATION_METHOD = 'LM_C'
-CALIBRATION_TARGET_RATE = 1.0  # spike per 5ms cycle (median active receptor)
-CALIBRATION_CYCLE_MS = 5.0
 
 USE_GPU = True
 GPU_DEVICE_ID = 0
