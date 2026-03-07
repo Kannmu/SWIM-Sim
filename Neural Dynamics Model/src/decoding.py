@@ -70,6 +70,11 @@ class PopulationDecoder:
         qy = self.compute_phase_locked_weight(spikes_y, t_vec, f0=f0)
         xp = cp if self.use_gpu else np
         fidelity = xp.asarray(fidelity_weights, dtype=xp.float64)
+
+        mean_fid = float(xp.mean(fidelity))
+        max_fid = float(xp.max(fidelity))
+        print(f"DEBUG: Fidelity Weights: mean={mean_fid:.4f}, max={max_fid:.4f}")
+
         return fidelity * qx, fidelity * qy
 
     def build_phase_locked_density_map(self, qx_complex, qy_complex, receptor_coords):
@@ -107,6 +112,9 @@ class PopulationDecoder:
         psi_x, psi_y, rho_map = self.build_phase_locked_density_map(qx_complex, qy_complex, receptor_coords)
         rho_max = cp.max(rho_map) if self.use_gpu else np.max(rho_map)
         rho_max_scalar = self._to_float(rho_max)
+        rho_mean_scalar = self._to_float(cp.mean(rho_map) if self.use_gpu else np.mean(rho_map))
+        print(f"DEBUG: Rho Map: max={rho_max_scalar:.4f}, mean={rho_mean_scalar:.4f}")
+
         if rho_max_scalar <= 0.0:
             zero_energy = cp.zeros_like(rho_map) if self.use_gpu else np.zeros_like(rho_map)
             return 0.0, 0.0, 0.0, rho_map, psi_x, psi_y, zero_energy

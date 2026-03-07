@@ -45,8 +45,17 @@ class LIFModel:
         )
 
     def run(self, currents_x, currents_y):
+        xp = cp if self.use_gpu else np
+        mean_cx = float(xp.mean(currents_x))
+        mean_cy = float(xp.mean(currents_y))
+        print(f"DEBUG: Running LIF. Currents mean: x={mean_cx:.4f}, y={mean_cy:.4f}")
+
         spikes_x = self.run_single(currents_x)
         spikes_y = self.run_single(currents_y)
+
+        count_x = int(xp.sum(spikes_x))
+        count_y = int(xp.sum(spikes_y))
+        print(f"DEBUG: LIF Spikes total: x={count_x}, y={count_y}")
         return spikes_x, spikes_y
 
     def run_counts_single(self, input_current):

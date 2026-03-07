@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import time
 from tqdm import tqdm
 from numba import cuda
 import config
@@ -69,6 +70,7 @@ def _complex_abs_max(x):
 
 def main():
     print("=== Computational Neural Dynamics Model ===")
+    print(f"DEBUG: Config: FS={config.FS_MODEL}, DT={config.DT_MS}, GPU={config.USE_GPU}")
     use_gpu = bool(getattr(config, "USE_GPU", False))
     gpu_ready = bool(use_gpu and cp is not None and cuda.is_available())
     if gpu_ready:
@@ -184,6 +186,9 @@ def main():
         if method_name not in methods_data:
             print(f"Skipping {method_name} (not in data)")
             continue
+        
+        t0 = time.time()
+        print(f"\n>>> Processing Method: {method_name}")
 
         m_data = methods_data[method_name]
 
@@ -263,6 +268,9 @@ def main():
             'nDWCI': ndwci,
             'RhoMax': rho_max,
         }
+        
+        t1 = time.time()
+        print(f"DEBUG: Method {method_name} finished in {t1 - t0:.2f}s")
 
     print("\n=== Final Results ===")
     print(f"{'Method':<10} | {'Intensity':<10} | {'Clarity':<10} | {'nDWCI':<10} | {'RhoMax':<10}")

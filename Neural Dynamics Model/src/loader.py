@@ -90,6 +90,7 @@ class DataLoader:
                     roi_y=roi_y,
                     t_vec=t_vec,
                 )
+                print(f"DEBUG: Loaded method '{name}': stress shape {tau_xz.shape if tau_xz is not None else 'None'}, t_vec {t_vec.shape}")
             except Exception as e:
                 print(f"Warning: Failed to parse method index {i}: {e}")
 
