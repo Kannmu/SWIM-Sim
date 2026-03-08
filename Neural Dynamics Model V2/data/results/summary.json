@@ -3,89 +3,89 @@
   "n_receptors": 441,
   "methods": {
     "DLM_2": {
-      "intensity_score": 12.017179287338868,
-      "mean_rate_hz": 1178.5105571528188,
-      "mean_vector_strength": 0.9327422910464744
+      "intensity_score": 11.04051390573525,
+      "mean_rate_hz": 414.94167411415543,
+      "mean_vector_strength": 0.353060915480675
     },
     "DLM_3": {
-      "intensity_score": 12.040441408160062,
-      "mean_rate_hz": 1214.3439548955148,
-      "mean_vector_strength": 0.9511223643670439
+      "intensity_score": 11.032646793244758,
+      "mean_rate_hz": 414.94167411415543,
+      "mean_vector_strength": 0.34992262497143334
     },
     "ULM_L": {
-      "intensity_score": 12.042803820348219,
-      "mean_rate_hz": 1183.1371477474454,
-      "mean_vector_strength": 0.9654496195775953
+      "intensity_score": 11.048487293680106,
+      "mean_rate_hz": 416.3024360537514,
+      "mean_vector_strength": 0.3620776488325163
     },
     "LM_L": {
-      "intensity_score": 11.999512159719819,
-      "mean_rate_hz": 1164.0864805931008,
-      "mean_vector_strength": 0.9390802891186362
+      "intensity_score": 11.00637361899716,
+      "mean_rate_hz": 408.1378644161752,
+      "mean_vector_strength": 0.35368818882506703
     },
     "LM_C": {
-      "intensity_score": 12.044644944352878,
-      "mean_rate_hz": 1215.341846984552,
-      "mean_vector_strength": 0.9534194885513169
+      "intensity_score": 11.029612323836739,
+      "mean_rate_hz": 413.49019471191957,
+      "mean_vector_strength": 0.3451088707834632
     }
   },
   "intensity_zscore": {
-    "DLM_2": -0.6612142137563511,
-    "DLM_3": 0.6492737223540497,
-    "ULM_L": 0.7823618743973257,
-    "LM_L": -1.6565042730097856,
-    "LM_C": 0.8860828900147613
+    "DLM_2": 0.6335783485196487,
+    "DLM_3": 0.07895874895979978,
+    "ULM_L": 1.1956902077890912,
+    "LM_L": -1.773260524373688,
+    "LM_C": -0.13496678089460107
   },
   "pairwise": {
     "intensity": [
       {
         "A": "DLM_2",
         "B": "DLM_3",
-        "preference_index": 0.212405206209648
+        "preference_index": 0.6352067077920323
       },
       {
         "A": "DLM_2",
         "B": "ULM_L",
-        "preference_index": 0.19099218159344938
+        "preference_index": 0.363058957186022
       },
       {
         "A": "DLM_2",
         "B": "LM_L",
-        "preference_index": 0.7301315409187347
+        "preference_index": 0.9173473173587731
       },
       {
         "A": "DLM_2",
         "B": "LM_C",
-        "preference_index": 0.17547699325006255
+        "preference_index": 0.683206092016279
       },
       {
         "A": "DLM_3",
         "B": "ULM_L",
-        "preference_index": 0.4667769859505702
+        "preference_index": 0.2466180675718114
       },
       {
         "A": "DLM_3",
         "B": "LM_L",
-        "preference_index": 0.9093544408740564
+        "preference_index": 0.8643874605960937
       },
       {
         "A": "DLM_3",
         "B": "LM_C",
-        "preference_index": 0.441072830388821
+        "preference_index": 0.5532783508144048
       },
       {
         "A": "ULM_L",
         "B": "LM_L",
-        "preference_index": 0.9197434318092976
+        "preference_index": 0.9511515486964555
       },
       {
         "A": "ULM_L",
         "B": "LM_C",
-        "preference_index": 0.47409296769273446
+        "preference_index": 0.7909492876533248
       },
       {
         "A": "LM_L",
         "B": "LM_C",
-        "preference_index": 0.07292606749811158
+        "preference_index": 0.1626973669214044
       }
     ]
   }

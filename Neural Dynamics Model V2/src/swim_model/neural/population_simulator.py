@@ -123,9 +123,23 @@ class PopulationSimulator:
             "yz": self._simulate_component(tau_yz_dyn, t_vec, integrator, bp, xp),
         }
 
-        weights = components["xy"]["weights"] + components["xz"]["weights"] + components["yz"]["weights"]
-        rates = components["xy"]["rates"] + components["xz"]["rates"] + components["yz"]["rates"]
-        vector_strength = components["xy"]["vector_strength"] + components["xz"]["vector_strength"] + components["yz"]["vector_strength"]
+        # 核心修改：从直接相加改为取最大值，消除旋转偏置
+        weights = np.maximum.reduce([
+            components["xy"]["weights"], 
+            components["xz"]["weights"], 
+            components["yz"]["weights"]
+        ])
+        rates = np.maximum.reduce([
+            components["xy"]["rates"], 
+            components["xz"]["rates"], 
+            components["yz"]["rates"]
+        ])
+        vector_strength = np.maximum.reduce([
+            components["xy"]["vector_strength"], 
+            components["xz"]["vector_strength"], 
+            components["yz"]["vector_strength"]
+        ])
+        
         population_map = integrator.collapse_to_map(weights)
 
         return {
