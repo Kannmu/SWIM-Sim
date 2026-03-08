@@ -22,8 +22,6 @@ class ModelConfig:
     refractory_s: float
     threshold: float
     gain: float
-    smoothing_sigma: float
-    clarity_mass_fraction: float
     enable_gpu: bool
     gpu_device_id: int
     chunk_size: int

@@ -10,7 +10,6 @@ from .config import load_config
 from .io.load_kwave_mat import KWaveMatLoader
 from .neural.population_simulator import PopulationSimulator
 from .preprocessing.receptor_lattice import build_receptor_lattice
-from .readout.clarity_score import compute_clarity_score
 from .readout.intensity_score import compute_intensity_score
 from .readout.pairwise_prediction import pairwise_preferences
 
@@ -43,24 +42,13 @@ def run_full_pipeline(model_config_path, experiment_config_path):
 
     condition_results = {}
     intensity_scores = {}
-    clarity_scores = {}
 
     for method_name in method_names:
         result = simulator.run_condition(method_name, data["methods"][method_name], lattice)
         intensity = compute_intensity_score(result["weights"])
-        clarity, area90 = compute_clarity_score(
-            result["population_map"],
-            result["roi_x"],
-            result["roi_y"],
-            mass_fraction=cfg.model.clarity_mass_fraction,
-            sigma=cfg.model.smoothing_sigma,
-        )
         result["intensity_score"] = intensity
-        result["clarity_score"] = clarity
-        result["a90_area_m2"] = area90
         condition_results[method_name] = result
         intensity_scores[method_name] = intensity
-        clarity_scores[method_name] = clarity
 
         if cfg.output.save_intermediate_npz:
             np.savez_compressed(
@@ -72,15 +60,14 @@ def run_full_pipeline(model_config_path, experiment_config_path):
                 receptor_coords_m=result["receptor_coords_m"],
             )
         if cfg.output.save_spike_trains:
-            np.save(cfg.results_dir / f"{method_name}_spikes.npy", result["spikes"].astype(np.uint8))
+            component_spikes = np.stack(
+                [result["spikes"][key].astype(np.uint8) for key in ("xy", "xz", "yz")],
+                axis=0,
+            )
+            np.save(cfg.results_dir / f"{method_name}_spikes.npy", component_spikes)
 
     intensity_z, intensity_pairwise = pairwise_preferences(
         {m: intensity_scores[m] for m in cfg.experiment.pairwise_methods if m in intensity_scores},
-        logistic_scale=cfg.experiment.logistic_scale,
-        standardize=cfg.experiment.standardize_scores,
-    )
-    clarity_z, clarity_pairwise = pairwise_preferences(
-        {m: clarity_scores[m] for m in cfg.experiment.pairwise_methods if m in clarity_scores},
         logistic_scale=cfg.experiment.logistic_scale,
         standardize=cfg.experiment.standardize_scores,
     )
@@ -91,18 +78,14 @@ def run_full_pipeline(model_config_path, experiment_config_path):
         "methods": {
             method_name: {
                 "intensity_score": float(condition_results[method_name]["intensity_score"]),
-                "clarity_score": float(condition_results[method_name]["clarity_score"]),
-                "a90_area_m2": float(condition_results[method_name]["a90_area_m2"]),
                 "mean_rate_hz": float(np.mean(condition_results[method_name]["rates"])),
                 "mean_vector_strength": float(np.mean(condition_results[method_name]["vector_strength"])),
             }
             for method_name in method_names
         },
         "intensity_zscore": intensity_z,
-        "clarity_zscore": clarity_z,
         "pairwise": {
             "intensity": intensity_pairwise,
-            "clarity": clarity_pairwise,
         },
     }
 

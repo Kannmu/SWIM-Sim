@@ -2,7 +2,6 @@ experiment:
   name: experiment1
   task_names:
     intensity: intensity
-    clarity: clarity
   logistic_scale: 1.0
   standardize_scores: true
   pairwise_methods:

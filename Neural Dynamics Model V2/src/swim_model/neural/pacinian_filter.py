@@ -23,5 +23,5 @@ class PacinianBandpassFilter:
     def apply(self, signal):
         xp = self.backend.xp
         signal = xp.asarray(signal, dtype=xp.float64)
-        filtered = self.backend.sosfiltfilt(self.sos, signal, axis=-1)
+        filtered = self.backend.sosfilt(self.sos, signal, axis=-1)
         return xp.asarray(filtered, dtype=xp.float32)

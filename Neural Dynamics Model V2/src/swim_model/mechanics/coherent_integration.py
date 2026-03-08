@@ -35,6 +35,9 @@ class CoherentIntegrator:
         self.source_to_receptor = _nearest_indices(self.source_coords, self.receptor_coords)
         self.receptor_count = self.receptor_coords.shape[0]
         self.source_count = self.source_coords.shape[0]
+        self.dx = abs(float(self.roi_x[1] - self.roi_x[0])) if len(self.roi_x) > 1 else 1.0
+        self.dy = abs(float(self.roi_y[1] - self.roi_y[0])) if len(self.roi_y) > 1 else 1.0
+        self.area_element = np.float32(self.dx * self.dy)
         self.distance_m = np.linalg.norm(
             self.receptor_coords[:, None, :] - self.source_coords[None, :, :],
             axis=-1,
@@ -46,6 +49,7 @@ class CoherentIntegrator:
         source_signal = xp.reshape(xp.asarray(tau_dyn, dtype=xp.float32), (-1, tau_dyn.shape[-1]))
         weight = xp.asarray(self.weight, dtype=xp.float32)
         delay_steps = xp.asarray(self.delay_steps, dtype=xp.int32)
+        area_element = xp.asarray(self.area_element, dtype=xp.float32)
         n_receptors = self.receptor_count
         n_time = source_signal.shape[1]
         integrated = xp.zeros((n_receptors, n_time), dtype=xp.float32)

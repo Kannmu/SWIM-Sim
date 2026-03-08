@@ -21,6 +21,6 @@ def pairwise_preferences(score_dict, logistic_scale=1.0, standardize=True):
     methods = list(scores.keys())
     for a, b in itertools.combinations(methods, 2):
         delta = (scores[a] - scores[b]) * float(logistic_scale)
-        prob = 1.0 / (1.0 + np.exp(-delta))
-        out.append({"A": a, "B": b, "probability": float(prob)})
+        preference_index = 1.0 / (1.0 + np.exp(-delta))
+        out.append({"A": a, "B": b, "preference_index": float(preference_index)})
     return scores, out
