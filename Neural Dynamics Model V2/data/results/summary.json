@@ -1,0 +1,161 @@
+{
+  "backend": "gpu",
+  "n_receptors": 441,
+  "methods": {
+    "DLM_2": {
+      "intensity_score": 10.599145748582318,
+      "clarity_score": 6.522492877511218,
+      "a90_area_m2": 0.0014700000000000026,
+      "mean_rate_hz": 365.25346590537333,
+      "mean_vector_strength": 0.24945308487122417
+    },
+    "DLM_3": {
+      "intensity_score": 10.600764590965017,
+      "clarity_score": 6.5211332579961026,
+      "a90_area_m2": 0.0014720000000000026,
+      "mean_rate_hz": 367.0221380149226,
+      "mean_vector_strength": 0.2488054068712678
+    },
+    "ULM_L": {
+      "intensity_score": 10.658812921931208,
+      "clarity_score": 6.5211332579961026,
+      "a90_area_m2": 0.0014720000000000026,
+      "mean_rate_hz": 371.60254527298594,
+      "mean_vector_strength": 0.26018448499984187
+    },
+    "LM_L": {
+      "intensity_score": 10.52233573112323,
+      "clarity_score": 6.5856717790883845,
+      "a90_area_m2": 0.0013800000000000025,
+      "mean_rate_hz": 354.9588872164585,
+      "mean_vector_strength": 0.23709782517248573
+    },
+    "LM_C": {
+      "intensity_score": 10.611799721583473,
+      "clarity_score": 6.520454140822755,
+      "a90_area_m2": 0.0014730000000000025,
+      "mean_rate_hz": 370.60483280093257,
+      "mean_vector_strength": 0.24909907733759382
+    }
+  },
+  "intensity_zscore": {
+    "DLM_2": 0.013085492767791416,
+    "DLM_3": 0.049989914832524907,
+    "ULM_L": 1.3733059640192624,
+    "LM_L": -1.7379369251054453,
+    "LM_C": 0.3015555534859475
+  },
+  "clarity_zscore": {
+    "DLM_2": -0.4536512075461571,
+    "DLM_3": -0.5064399151686353,
+    "ULM_L": -0.5064399151686353,
+    "LM_L": 1.9993384165274188,
+    "LM_C": -0.5328073786440255
+  },
+  "pairwise": {
+    "intensity": [
+      {
+        "A": "DLM_2",
+        "B": "DLM_3",
+        "probability": 0.49077494145527906
+      },
+      {
+        "A": "DLM_2",
+        "B": "ULM_L",
+        "probability": 0.20420447226561048
+      },
+      {
+        "A": "DLM_2",
+        "B": "LM_L",
+        "probability": 0.8520817123437744
+      },
+      {
+        "A": "DLM_2",
+        "B": "LM_C",
+        "probability": 0.42837846272417623
+      },
+      {
+        "A": "DLM_3",
+        "B": "ULM_L",
+        "probability": 0.2102671183566429
+      },
+      {
+        "A": "DLM_3",
+        "B": "LM_L",
+        "probability": 0.8566729129145229
+      },
+      {
+        "A": "DLM_3",
+        "B": "LM_C",
+        "probability": 0.43743817966833287
+      },
+      {
+        "A": "ULM_L",
+        "B": "LM_L",
+        "probability": 0.9573541283208141
+      },
+      {
+        "A": "ULM_L",
+        "B": "LM_C",
+        "probability": 0.7449296529651992
+      },
+      {
+        "A": "LM_L",
+        "B": "LM_C",
+        "probability": 0.11511842120994842
+      }
+    ],
+    "clarity": [
+      {
+        "A": "DLM_2",
+        "B": "DLM_3",
+        "probability": 0.5131941131025537
+      },
+      {
+        "A": "DLM_2",
+        "B": "ULM_L",
+        "probability": 0.5131941131025537
+      },
+      {
+        "A": "DLM_2",
+        "B": "LM_L",
+        "probability": 0.07922019845665698
+      },
+      {
+        "A": "DLM_2",
+        "B": "LM_C",
+        "probability": 0.5197787165616891
+      },
+      {
+        "A": "DLM_3",
+        "B": "ULM_L",
+        "probability": 0.5
+      },
+      {
+        "A": "DLM_3",
+        "B": "LM_L",
+        "probability": 0.07545408897758275
+      },
+      {
+        "A": "DLM_3",
+        "B": "LM_C",
+        "probability": 0.506591483982943
+      },
+      {
+        "A": "ULM_L",
+        "B": "LM_L",
+        "probability": 0.07545408897758275
+      },
+      {
+        "A": "ULM_L",
+        "B": "LM_C",
+        "probability": 0.506591483982943
+      },
+      {
+        "A": "LM_L",
+        "B": "LM_C",
+        "probability": 0.9263648585195844
+      }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+model:
+  carrier_frequency_hz: 200.0
+  target_frequency_hz: 200.0
+  conduction_velocity_m_s: 5.0
+  spatial_decay_lambda_m: 0.004
+  receptor_spacing_m: 0.002
+  receptor_padding_m: 0.0
+  bandpass_low_hz: 60.0
+  bandpass_high_hz: 450.0
+  bandpass_order: 2
+  membrane_tau_s: 0.002
+  refractory_s: 0.002
+  threshold: 1.0
+  gain: 1.0
+  smoothing_sigma: 1.0
+  clarity_mass_fraction: 0.90
+  enable_gpu: true
+  gpu_device_id: 0
+  chunk_size: 128
+  receptor_chunk_size: 64
+  float_dtype: float32
+  steady_state_only: true
+  fft_window_cycles: 10
+
+data:
+  mat_file: "../../Sim/Outputs_Experiment1/experiment1_data.mat"
+  required_methods:
+    - DLM_2
+    - DLM_3
+    - ULM_L
+    - LM_L
+    - LM_C
+
+output:
+  results_dir: "../data/results"
+  save_intermediate_npz: true
+  save_population_maps: true
+  save_spike_trains: true
