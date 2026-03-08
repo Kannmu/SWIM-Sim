@@ -20,7 +20,6 @@ class StressProcessor:
         f_low,
         f_high,
         spatial_sigma,
-        pca_window_ms,
         use_gpu=False,
         enable_temporal_tuning=False,
         temporal_tuning_center_hz=200.0,
@@ -31,7 +30,6 @@ class StressProcessor:
         self.f_low = f_low
         self.f_high = f_high
         self.spatial_sigma = spatial_sigma
-        self.pca_window_ms = pca_window_ms
         self.use_gpu = bool(use_gpu and cp is not None)
         self.enable_temporal_tuning = bool(enable_temporal_tuning)
         self.temporal_tuning_center_hz = float(temporal_tuning_center_hz)

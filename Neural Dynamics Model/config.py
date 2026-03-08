@@ -6,7 +6,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(os.path.dirname(ROOT_DIR), 'Sim', 'Outputs_Experiment1')
 DATA_FILE = os.path.join(DATA_DIR, 'experiment1_data.mat')
 
-# Topography Parameters
+# Topography
 ROI_SIZE_MM = 40.0
 N_RECEPTORS = 320
 MIN_DISTANCE_MM = 1.8
@@ -14,68 +14,27 @@ RANDOM_SEED = 2025
 SEED_RUN_COUNT = 1
 SEED_STRIDE = 1
 
-# Spatial Pooling / Time Window Parameters
-SPATIAL_SIGMA_MM = 2.0
-PCA_STEADY_STATE_WINDOW_MS = 50.0
+# Time / preprocessing
 STEADY_STATE_WINDOW_MS = 50.0
-TRIAL_BIN_MS = 1.0
-
-# Biomechanical Filter Parameters
 FS_MODEL = 10000.0
 DT_MS = 0.1
 FILTER_ORDER = 4
 F_LOW_HZ = 80.0
 F_HIGH_HZ = 900.0
+SPATIAL_SIGMA_MM = 2.0
 
-# LIF Model Parameters
-TAU_M_MS = 2.0
-V_REST = 0.0
-V_RESET = 0.0
-V_THRESH = 1.0
-R_M = 1.0
-T_REF_MS = 1.0
-
-# Calibration Parameters
-CALIBRATION_AM_FREQUENCIES_HZ = (200.0, 400.0)
-CALIBRATION_AMPLITUDE_LEVELS = (0.35, 0.55, 0.75, 0.95, 1.15)
-CALIBRATION_TRIALS_PER_LEVEL = 64
-CALIBRATION_SIGMOID_SLOPE = 6.0
-CALIBRATION_MAX_ITER = 15
-CALIBRATION_GAMMA_INIT = 1.0
-CALIBRATION_SIGMA_INIT = 0.08
-CALIBRATION_GAMMA_BOUNDS = (1e-2, 1e2)
-CALIBRATION_SIGMA_BOUNDS = (1e-3, 1.0)
-CALIBRATION_COARSE_TO_FINE = False
-CALIBRATION_TOPK = 1
-# Calibration stimulus
-CALIBRATION_DURATION_MS = 50.0
-
-# Trial-Level Stochasticity
-TRIAL_COUNT = 200
-INPUT_NOISE_SIGMA = 0.0
-THRESHOLD_NOISE_FRACTION = 0.1
-ENABLE_INPUT_NOISE = True
-ENABLE_THRESHOLD_NOISE = True
-CALIBRATION_OPT_FREQS_HZ = (200.0,)
-CALIBRATION_DIAGNOSTIC_FREQS_HZ = (200.0, 400.0)
-
-# Receptor temporal tuning (fixed physiology, not fitted per method)
+# Fixed receptor temporal tuning
 ENABLE_TEMPORAL_TUNING = True
 TEMPORAL_TUNING_CENTER_HZ = 200.0
-TEMPORAL_TUNING_SIGMA_OCT = 0.5
+TEMPORAL_TUNING_SIGMA_OCT = 0.50
 
-# PCA / Observer Parameters
-PCA_VARIANCE_RATIO = 0.95
-COVARIANCE_REG_EPS = 1e-3
-POSITION_DELTA_MM = 1.0
-BASELINE_CONDITION_NAME = '__baseline__'
-
-# Experiment 1 Stimuli
+# Stimuli
 STIMULUS_METHODS = ['DLM_2', 'DLM_3', 'ULM_L', 'LM_L', 'LM_C']
 PAIRWISE_METHODS = ['DLM_2', 'DLM_3', 'ULM_L', 'LM_L', 'LM_C']
 
-# Mechanistic explanation layer
-PHASE_LOCK_F0_HZ = 200.0
+# Bridge / mechanistic diagnostics
+BRIDGE_TARGET_FREQ_HZ = 200.0
+BRIDGE_SCORE_EPS = 1e-12
 FIDELITY_FREQS_HZ = (200.0, 400.0, 600.0, 800.0)
 DENSITY_GRID_MM = 1.0
 DENSITY_SIGMA_MM = 2.0
