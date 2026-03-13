@@ -1,0 +1,92 @@
+{
+  "backend": "gpu",
+  "n_receptors": 441,
+  "methods": {
+    "ULM_L_M0p2": {
+      "intensity_score": 10.967076068005502,
+      "mean_rate_hz": 398.3403784510836,
+      "mean_vector_strength": 0.35575519826004426
+    },
+    "ULM_L_M0p5": {
+      "intensity_score": 11.048201343011629,
+      "mean_rate_hz": 415.1231090394349,
+      "mean_vector_strength": 0.3674639432139075
+    },
+    "ULM_L_M1p0": {
+      "intensity_score": 11.05000529813506,
+      "mean_rate_hz": 416.66530590431034,
+      "mean_vector_strength": 0.35352325707539073
+    },
+    "ULM_L_M1p2": {
+      "intensity_score": 11.048487293680106,
+      "mean_rate_hz": 416.3024360537514,
+      "mean_vector_strength": 0.3620776488325163
+    },
+    "ULM_L_M2p0": {
+      "intensity_score": 11.045250574762965,
+      "mean_rate_hz": 414.21593441303753,
+      "mean_vector_strength": 0.36783050965725916
+    }
+  },
+  "intensity_zscore": {
+    "ULM_L_M0p2": -1.9977396703133747,
+    "ULM_L_M0p5": 0.5060772432261798,
+    "ULM_L_M1p0": 0.5617537675766177,
+    "ULM_L_M1p2": 0.5149027063154197,
+    "ULM_L_M2p0": 0.41500595319504807
+  },
+  "pairwise": {
+    "intensity": [
+      {
+        "A": "ULM_L_M0p2",
+        "B": "ULM_L_M0p5",
+        "preference_index": 0.0755910330084042
+      },
+      {
+        "A": "ULM_L_M0p2",
+        "B": "ULM_L_M1p0",
+        "preference_index": 0.07179129087449027
+      },
+      {
+        "A": "ULM_L_M0p2",
+        "B": "ULM_L_M1p2",
+        "preference_index": 0.07497664112805998
+      },
+      {
+        "A": "ULM_L_M0p2",
+        "B": "ULM_L_M2p0",
+        "preference_index": 0.08220592824579288
+      },
+      {
+        "A": "ULM_L_M0p5",
+        "B": "ULM_L_M1p0",
+        "preference_index": 0.4860844634291011
+      },
+      {
+        "A": "ULM_L_M0p5",
+        "B": "ULM_L_M1p2",
+        "preference_index": 0.4977936485485101
+      },
+      {
+        "A": "ULM_L_M0p5",
+        "B": "ULM_L_M2p0",
+        "preference_index": 0.5227520992267188
+      },
+      {
+        "A": "ULM_L_M1p0",
+        "B": "ULM_L_M1p2",
+        "preference_index": 0.5117106233040695
+      },
+      {
+        "A": "ULM_L_M1p0",
+        "B": "ULM_L_M2p0",
+        "preference_index": 0.5366212575137299
+      },
+      {
+        "A": "ULM_L_M1p2",
+        "B": "ULM_L_M2p0",
+        "preference_index": 0.5249534401145558
+      }
+    ]
+  }
+}

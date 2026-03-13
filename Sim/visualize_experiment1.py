@@ -309,7 +309,7 @@ def plot_xt_diagram(data, t, x, title, output_path, vmax, zoom_dur=ZOOM_DURATION
     
     img = plt.imshow(data_zoom, extent=extent, origin='lower', cmap=CMAP_XT, aspect='auto', vmin=0, vmax=vmax)
     
-    plt.colorbar(img, label='Shear Stress [Pa]')
+    plt.colorbar(img, label='Shear stress [Pa]')
     plt.xlabel('Time [ms]', fontweight='bold')
     plt.ylabel('x [mm]', fontweight='bold')
     plt.title(title, fontweight='bold', pad=TITLE_PAD)
@@ -319,7 +319,7 @@ def plot_xt_diagram(data, t, x, title, output_path, vmax, zoom_dur=ZOOM_DURATION
     plt.savefig(output_path)
     plt.close()
 
-def plot_wavefront_snapshots(snapshots, x, y, title, output_path, unit_label='[Pa]'):
+def plot_wavefront_snapshots(snapshots, x, y, title, output_path, unit_label='[Pa]', vmax=None):
     """Plots 4 snapshots of the wavefront."""
     # Ensure 4 snapshots
     if snapshots.ndim == 3 and snapshots.shape[2] >= 4:
@@ -348,10 +348,11 @@ def plot_wavefront_snapshots(snapshots, x, y, title, output_path, unit_label='[P
     if np.allclose(snapshots_demeaned[0], snapshots_demeaned[1], atol=1e-6):
         print(f"  WARNING: Snapshots 0 and 1 for {title} are identical!")
 
-    vmax = np.max(np.abs(snapshots_demeaned))
-    if vmax < 1e-6: 
-        print(f"  WARNING: Signal too weak (max < 1e-6). Vmax set to 1.")
-        vmax = 1
+    if vmax is None:
+        vmax = np.max(np.abs(snapshots_demeaned))
+        if vmax < 1e-6: 
+            print(f"  WARNING: Signal too weak (max < 1e-6). Vmax set to 1.")
+            vmax = 1
         
     print(f"  Snapshots Vmax: {vmax:.2e} {unit_label}")
     vmin = -vmax
@@ -422,7 +423,7 @@ def plot_xt_diagram_signed(data, t, x, title, output_path, vmax=None, zoom_dur=Z
     
     img = plt.imshow(data_zoom, extent=extent, origin='lower', cmap=CMAP_WAVEFRONT, aspect='auto', vmin=vmin, vmax=vmax)
     
-    plt.colorbar(img, label='Shear Stress (Signed) [Pa]')
+    plt.colorbar(img, label='Shear stress (signed) [Pa]')
     plt.xlabel('Time [ms]', fontweight='bold')
     plt.ylabel('x [mm]', fontweight='bold')
     plt.title(title, fontweight='bold', pad=TITLE_PAD)
@@ -593,7 +594,7 @@ def plot_spectrum_comparison(results_list, dt, output_path):
     plt.xlim(0, 1000)
     plt.xlabel('Frequency [Hz]', fontweight='bold')
     plt.ylabel('Magnitude [dB]', fontweight='bold')
-    plt.title('Frequency Spectrum Comparison (Log Scale)', fontweight='bold', pad=TITLE_PAD)
+    plt.title('Frequency spectrum comparison (log scale)', fontweight='bold', pad=TITLE_PAD)
     plt.legend(loc='best', frameon=True)
     plt.grid(True, linestyle='--', alpha=GRID_ALPHA)
     
@@ -632,8 +633,8 @@ def plot_spatial_focusing(results_list, x_vec, dx, output_path):
         FWHM_Y_OFFSET -= 0.08
         
     plt.xlabel('x [mm]', fontweight='bold')
-    plt.ylabel('Normalized Peak Stress', fontweight='bold')
-    plt.title('Spatial Focusing Profile (Normalized)', fontweight='bold', pad=TITLE_PAD)
+    plt.ylabel('Normalized peak stress', fontweight='bold')
+    plt.title('Spatial focusing profile (normalized)', fontweight='bold', pad=TITLE_PAD)
     plt.legend(loc='best', frameon=True)
     # plt.legend(bbox_to_anchor=(0.5, 0.02), loc='lower center', frameon=True, ncol=1)
     plt.grid(True, linestyle='--', alpha=GRID_ALPHA)
@@ -664,8 +665,8 @@ def plot_cross_section_comparison(results_list, x_vec, output_path):
         plt.plot(x_vec * 1000, profile, linewidth=LINE_WIDTH, label=label, color=color)
         
     plt.xlabel('x [mm]', fontweight='bold')
-    plt.ylabel('Shear Stress RMS [Pa]', fontweight='bold')
-    plt.title('Cross-section Comparison (y=0)', fontweight='bold', pad=TITLE_PAD)
+    plt.ylabel('Shear stress RMS [Pa]', fontweight='bold')
+    plt.title('Cross-section comparison (y=0)', fontweight='bold', pad=TITLE_PAD)
     plt.legend(loc='best', frameon=True)
     plt.grid(True, linestyle='--', alpha=GRID_ALPHA)
     plt.xlim(x_vec.min()*1000, x_vec.max()*1000)
@@ -709,6 +710,34 @@ def main():
     global_max_rate = max([np.max(r['tau_dt_peak']) for r in results])
     global_max_grad = max([np.max(r['grad_mag']) for r in results])
     
+    # Calculate global max for Wavefront Snapshots (tau_xy)
+    global_max_tau_xy = 0
+    for res in results:
+        if 'tau_xy_snapshots' in res:
+            snapshots = res['tau_xy_snapshots']
+            if snapshots.ndim == 3 and snapshots.shape[2] >= 4:
+                # Use first 4 snapshots
+                for i in range(4):
+                    snap = snapshots[:, :, i]
+                    snap = snap - np.mean(snap)
+                    current_max = np.max(np.abs(snap))
+                    if current_max > global_max_tau_xy:
+                        global_max_tau_xy = current_max
+    
+    # Calculate global max for Wavefront Snapshots (uz)
+    global_max_uz = 0
+    for res in results:
+        if 'uz_snapshots' in res:
+            snapshots = res['uz_snapshots']
+            if snapshots.ndim == 3 and snapshots.shape[2] >= 4:
+                # Use first 4 snapshots
+                for i in range(4):
+                    snap = snapshots[:, :, i]
+                    snap = snap - np.mean(snap)
+                    current_max = np.max(np.abs(snap))
+                    if current_max > global_max_uz:
+                        global_max_uz = current_max
+    
     # Calculate global max for Signed XT Diagram (after zooming and demeaning)
     global_max_xt_signed = 0
     for res in results:
@@ -738,52 +767,54 @@ def main():
         
         # 1. RMS Shear Stress
         plot_heatmap(res['tau_rms'], x_vec, y_vec, 
-                     f'{name} | RMS Shear Stress', 'RMS [Pa]', CMAP_ENERGY,
+                     f'{name} | RMS shear stress', 'RMS [Pa]', CMAP_ENERGY,
                      os.path.join(OUTPUT_DIR, f'{name}_1_energy_rms.png'),
                      vmax=global_max_rms)
         
         # 2. Peak Stress
         plot_heatmap(res['tau_peak'], x_vec, y_vec,
-                     f'{name} | Peak Shear Stress', 'Peak Stress [Pa]', CMAP_STRESS,
+                     f'{name} | Peak shear stress', 'Peak stress [Pa]', CMAP_STRESS,
                      os.path.join(OUTPUT_DIR, f'{name}_2_peak_stress.png'),
                      vmax=global_max_peak)
                      
         # 3. Rate of Change
         plot_heatmap(res['tau_dt_peak'], x_vec, y_vec,
-                     f'{name} | Max Rate of Change', '|dτ/dt| [Pa/s]', CMAP_RATE,
+                     f'{name} | Max rate of change', '|dτ/dt| [Pa/s]', CMAP_RATE,
                      os.path.join(OUTPUT_DIR, f'{name}_3_rate_of_change.png'),
                      vmax=global_max_rate)
                      
         # 4. Gradient
         plot_heatmap(res['grad_mag'], x_vec, y_vec,
-                     f'{name} | Stress Gradient Snapshot', '|∇τ| [Pa/m]', CMAP_GRAD,
+                     f'{name} | Stress gradient snapshot', '|∇τ| [Pa/m]', CMAP_GRAD,
                      os.path.join(OUTPUT_DIR, f'{name}_4_gradient_snapshot.png'),
                      vmax=global_max_grad)
                      
         # 5. Waveform
         plot_waveform(res['t_vec'], res['center_waveform'],
-                      f'{name} | Center Waveform',
+                      f'{name} | Center waveform',
                       os.path.join(OUTPUT_DIR, f'{name}_5_waveform.png'))
                       
         # 6. XT Diagram (Signed & Demeaned)
         plot_xt_diagram_signed(res['xt_slice_signed'], res['t_vec'], x_vec,
-                        f'{name} | Signed XT Diagram (tau_xz)',
+                        f'{name} | Signed XT diagram (tau_xz)',
                         os.path.join(OUTPUT_DIR, f'comparison_XT_diagram_{name}_tau_xz.png'),
                         vmax=global_max_xt_signed)
 
         # 7. Wavefront Snapshots (Shear Stress tau_xy)
         if 'tau_xy_snapshots' in res:
             plot_wavefront_snapshots(res['tau_xy_snapshots'], x_vec, y_vec,
-                                     f'{name} | Wavefront Snapshots (tau_xy)',
+                                     f'{name} | Wavefront snapshots (tau_xy)',
                                      os.path.join(OUTPUT_DIR, f'{name}_snapshots_tau_xy.png'),
-                                     unit_label='[Pa]')
+                                     unit_label='[Pa]',
+                                     vmax=global_max_tau_xy)
                                      
         # 8. Wavefront Snapshots (Particle Velocity uz)
         if 'uz_snapshots' in res:
             plot_wavefront_snapshots(res['uz_snapshots'], x_vec, y_vec,
-                                     f'{name} | Wavefront Snapshots (uz)',
+                                     f'{name} | Wavefront snapshots (uz)',
                                      os.path.join(OUTPUT_DIR, f'{name}_snapshots_uz.png'),
-                                     unit_label='[m/s]')
+                                     unit_label='[m/s]',
+                                     vmax=global_max_uz)
 
     print("Generating comparison plots...")
 
@@ -796,13 +827,13 @@ def main():
 
     # d. Frequency Fidelity Index
     plot_metric_bar(ordered_results, ffi_values,
-                    'Frequency Fidelity Index',
+                    'Frequency fidelity index',
                     'FFI',
                     os.path.join(OUTPUT_DIR, 'comparison_frequency_fidelity_index.png'))
 
     # e. Directional Wavefront Concentration Index
     plot_metric_bar(ordered_results, dwci_values,
-                    'Directional Wavefront Concentration Index',
+                    'Directional wavefront concentration index',
                     'DWCI',
                     os.path.join(OUTPUT_DIR, 'comparison_directional_wavefront_concentration_index.png'))
     

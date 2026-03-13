@@ -1,0 +1,12 @@
+experiment:
+  name: supplementary_experiment1
+  task_names:
+    intensity: intensity
+  logistic_scale: 1.0
+  standardize_scores: true
+  pairwise_methods:
+    - ULM_L_M0p2
+    - ULM_L_M0p5
+    - ULM_L_M1p0
+    - ULM_L_M1p2
+    - ULM_L_M2p0
